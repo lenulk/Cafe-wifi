@@ -51,6 +51,7 @@ FAS_KEY = os.environ.get("FAS_KEY", "")
 GATEWAY_NAME = os.environ.get("GATEWAY_NAME", "Cafe-Guest")
 GATEWAY_IP = os.environ.get("GATEWAY_IP", "10.10.0.1")
 GATEWAY_AUTHDIR = os.environ.get("GATEWAY_AUTHDIR", "opennds_auth")
+NDS_PORT = os.environ.get("NDS_PORT", "2050")
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 _attempts: dict[str, list[float]] = {}
@@ -111,7 +112,13 @@ def _load_context(nonce: str, ip: str) -> ClientContext | None:
 
 
 def _valid_gateway(ctx: ClientContext) -> bool:
-    return ctx.gatewayaddress == GATEWAY_IP and ctx.authdir.strip("/") == GATEWAY_AUTHDIR
+    # openNDS 10.1.3 ตัวจริงส่ง gatewayaddress เป็น "ip:port" (เช่น "10.10.0.1:2050" -- ดู payload จริง
+    # ใน tests/test_opennds_proto.py) ไม่ใช่ IP เปล่า -- เดิมเทียบทั้งสตริงกับ GATEWAY_IP ตรง ๆ
+    # ลูกค้าทุกคนบนเครื่องจริงจึงเจอ "หน้านี้หมดอายุแล้ว" ทั้งที่เทสต์ (ใช้ค่าที่สร้างเองไม่มีพอร์ต) ผ่าน
+    host, sep, port = ctx.gatewayaddress.partition(":")
+    if sep and port != NDS_PORT:
+        return False
+    return host == GATEWAY_IP and ctx.authdir.strip("/") == GATEWAY_AUTHDIR
 
 
 @app.context_processor

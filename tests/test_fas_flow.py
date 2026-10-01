@@ -16,7 +16,8 @@ from fas.opennds_proto import encrypt_fas_payload, auth_token
 FASKEY = "a1b2c3d4e5f60718293a4b5c6d7e8f90"  # ตรงกับที่จะตั้งใน env ตอนเทสต์
 GW_PARAMS = dict(clientip="10.10.0.105", clientmac="AA:BB:CC:DD:EE:01",
                  gatewayname="Cafe-Guest", client_hid="hid-0001",
-                 gatewayaddress="10.10.0.1", authdir="opennds_auth",
+                 # openNDS จริงส่งพร้อมพอร์ต (ดู test_opennds_proto.py) -- อย่าใช้ IP เปล่า ไม่งั้นจับบั๊กพอร์ตไม่ได้
+                 gatewayaddress="10.10.0.1:2050", authdir="opennds_auth",
                  originurl="http://example.com/", clientif="eth1")
 
 VOUCHERS: dict[str, dict] = {}
@@ -241,7 +242,7 @@ def test_successful_login_redirects_to_gateway_auth_url(client):
     r = _post_login(client, html, code, pw)
     assert r.status_code == 302
     loc = r.headers["Location"]
-    assert loc.startswith("http://10.10.0.1/opennds_auth/?tok=")
+    assert loc.startswith("http://10.10.0.1:2050/opennds_auth/?tok=")
     assert auth_token("hid-0001", FASKEY) in loc
     assert len(SESSIONS) == 1 and SESSIONS[0]["ended_at"] is None
     assert len(DEVICES) == 0
@@ -459,7 +460,7 @@ def test_hidden_context_is_ignored_and_nonce_is_single_use(client):
                                          ctx_clientmac="AA:BB:CC:DD:EE:99",
                                          ctx_gatewayaddress="evil.example"))
     assert r.status_code == 302
-    assert r.headers["Location"].startswith("http://10.10.0.1/opennds_auth/")
+    assert r.headers["Location"].startswith("http://10.10.0.1:2050/opennds_auth/")
     assert SESSIONS[-1]["mac"] == "AA:BB:CC:DD:EE:01"
     replay = client.post("/login", data=dict(nonce=nonce, username=code, password=pw))
     assert replay.status_code == 400
@@ -468,3 +469,27 @@ def test_hidden_context_is_ignored_and_nonce_is_single_use(client):
 def test_missing_context_rejected(client):
     r = client.post("/login", data=dict(username="X", password="Y"))
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("address,ok", [
+    ("10.10.0.1:2050", True),    # รูปแบบที่ openNDS 10.1.3 ตัวจริงส่งมา
+    ("10.10.0.1", True),         # เผื่อรุ่นที่ไม่ใส่พอร์ต
+    ("10.10.0.1:8080", False),   # พอร์ตไม่ใช่ของ openNDS
+    ("10.10.0.99:2050", False),  # gateway อื่น
+    ("evil.example:2050", False),
+])
+def test_valid_gateway_accepts_ip_with_nds_port(client, address, ok):
+    from fas.opennds_proto import ClientContext
+    ctx = ClientContext(clientmac="AA:BB:CC:DD:EE:01", hid="h", gatewayaddress=address,
+                        authdir="opennds_auth")
+    assert client.module._valid_gateway(ctx) is ok
+
+
+def test_real_opennds_gateway_address_passes_validation(client):
+    """payload จริงจาก openNDS 10.1.3 (ชุดเดียวกับ test_opennds_proto.py) ต้องผ่านการตรวจ gateway --
+    เดิมเทียบ "10.10.0.1:2050" == "10.10.0.1" ตรง ๆ ลูกค้าจริงทุกคน login ไม่ได้"""
+    from fas.opennds_proto import decrypt_fas_payload
+    from test_opennds_proto import REAL_FAS_B64, REAL_FASKEY, REAL_IV
+    ctx = decrypt_fas_payload(REAL_FAS_B64, REAL_IV, REAL_FASKEY)
+    assert ctx.gatewayaddress == "10.10.0.1:2050"
+    assert client.module._valid_gateway(ctx)

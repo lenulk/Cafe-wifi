@@ -41,6 +41,25 @@ def test_encrypt_decrypt_roundtrip():
     assert ctx.is_complete()
 
 
+# ค่าจับจาก openNDS 10.1.3 ตัวจริง (VM lab, 2026-08-28) -- ห้ามแก้เป็นค่าที่สร้างเอง ดู
+# test_decrypt_real_capture_from_live_opennds; test_fas_flow.py ใช้ชุดเดียวกันตรวจ _valid_gateway
+REAL_FAS_B64 = (
+    "NHo0ZzNWR0lrYjNraVk3Q3V3cGpuc1JwVkhvb095MFphV3FWZms3MlVEVlkreUt0dXNWSjZwWmxt"
+    "aENpcUdxdDBjWHZGZjJzZjNUcjBoZitaWDhJRC9Gc08rdnhwOXFtZFBsWWpISWFET1Rhb1RCU2Rk"
+    "TUswVnp2SW9jakJrMlYzMktoaEJ5TjdNUW1WL0R5dUo4RGdubWNuTjhPUFV2SmpQYnFVdWI1UFBy"
+    "RmF2Z1J1Ni9TdUQrMUZvU0JjS2xVblFrVEV2SHAvWTM5Wm5zblpwTFNXUDEwYmpLallWR1QzZTZ2"
+    "SW42N2dBOWRTcFRVYUR4Vi9yaEtxMXZkV2N1YktDSURZZGJ2eHUySWtvbFJtQk0rdmFwOHd4UzBU"
+    "bGtwb08zdFkwTDM5Zmo3RWttQnhsUkdiNGxsVEYzWjhBYnRCaXV6aVBHdVdZZ09FUEppZG9JMzZV"
+    "T0JUVlNlcG9yTWRWN1ZEd2dFSU0xejBFc0REelBLUHpyTW14aWZIeWszK3pVK1JKNFd2YWF2Zi9Q"
+    "a1NmcjFXd1VEOFB6U1JKUHdQdE5wdkMvbXdyZE9QSW1xYTJPYzRKNmNubVpTRFVxcVpldXpDaFNp"
+    "Wk5kb1hHRGF6V2FCcmtncVpCL2haSURXZmkxZmk2OS9vSmlLanFlbWtRUkdpU0YzMWNIeUd4OFBx"
+    "dWJXdzBqZ0NwYzh3NnhyeENIbnJ6eUFwS1VZY0lyMDdlcEZOemRLZ2cyZGorbHRVc0Mrblp5eXN0"
+    "a2RXVzdK"
+)
+REAL_IV = "ca6c3800c66deebc"
+REAL_FASKEY = "205c091caa29eb5393173febfc660e60"
+
+
 def test_decrypt_real_capture_from_live_opennds():
     """
     Regression test — กันบั๊ก double-base64 encoding กลับมาแบบเงียบๆ อีก (2026-08-28)
@@ -57,23 +76,7 @@ def test_decrypt_real_capture_from_live_opennds():
     ค่าด้านล่างจับมาจาก openNDS จริงตัวเป็นๆ (VM lab, 2026-08-28) ห้ามแก้เป็นค่าที่สร้างเอง
     เด็ดขาด — ต้องเป็นค่าจริงจาก binary เท่านั้นถึงจะจับบั๊กสายนี้ได้
     """
-    fas_b64 = (
-        "NHo0ZzNWR0lrYjNraVk3Q3V3cGpuc1JwVkhvb095MFphV3FWZms3MlVEVlkreUt0dXNWSjZwWmxt"
-        "aENpcUdxdDBjWHZGZjJzZjNUcjBoZitaWDhJRC9Gc08rdnhwOXFtZFBsWWpISWFET1Rhb1RCU2Rk"
-        "TUswVnp2SW9jakJrMlYzMktoaEJ5TjdNUW1WL0R5dUo4RGdubWNuTjhPUFV2SmpQYnFVdWI1UFBy"
-        "RmF2Z1J1Ni9TdUQrMUZvU0JjS2xVblFrVEV2SHAvWTM5Wm5zblpwTFNXUDEwYmpLallWR1QzZTZ2"
-        "SW42N2dBOWRTcFRVYUR4Vi9yaEtxMXZkV2N1YktDSURZZGJ2eHUySWtvbFJtQk0rdmFwOHd4UzBU"
-        "bGtwb08zdFkwTDM5Zmo3RWttQnhsUkdiNGxsVEYzWjhBYnRCaXV6aVBHdVdZZ09FUEppZG9JMzZV"
-        "T0JUVlNlcG9yTWRWN1ZEd2dFSU0xejBFc0REelBLUHpyTW14aWZIeWszK3pVK1JKNFd2YWF2Zi9Q"
-        "a1NmcjFXd1VEOFB6U1JKUHdQdE5wdkMvbXdyZE9QSW1xYTJPYzRKNmNubVpTRFVxcVpldXpDaFNp"
-        "Wk5kb1hHRGF6V2FCcmtncVpCL2haSURXZmkxZmk2OS9vSmlLanFlbWtRUkdpU0YzMWNIeUd4OFBx"
-        "dWJXdzBqZ0NwYzh3NnhyeENIbnJ6eUFwS1VZY0lyMDdlcEZOemRLZ2cyZGorbHRVc0Mrblp5eXN0"
-        "a2RXVzdK"
-    )
-    iv = "ca6c3800c66deebc"
-    faskey = "205c091caa29eb5393173febfc660e60"
-
-    ctx = decrypt_fas_payload(fas_b64, iv, faskey)
+    ctx = decrypt_fas_payload(REAL_FAS_B64, REAL_IV, REAL_FASKEY)
 
     assert ctx.clientip == "10.10.0.222"
     assert ctx.clientmac == "aa:bb:db:36:03:d1"
