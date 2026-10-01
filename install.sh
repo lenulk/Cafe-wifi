@@ -735,6 +735,17 @@ SQL
     die "ไม่พบ sql/007_conn_log_started_at.sql — cafe-logger จะเขียน conn_log ไม่ได้ถ้าไม่มีคอลัมน์นี้"
   fi
 
+  # คอลัมน์/ตารางของรีวิวรอบ 2 (pending session, FAS nonce, dns answer, การลบ archive) -- เคยแก้ไว้ใน
+  # 001_schema.sql อย่างเดียว ซึ่งเป็น CREATE TABLE IF NOT EXISTS เครื่องที่ติดตั้งไว้แล้วจึงไม่ได้
+  # คอลัมน์ใหม่ แล้ว FAS พังตอน login + dns_log เขียนไม่ได้ (หลักฐานหาย) -- ไฟล์นี้รันซ้ำได้เสมอ
+  local r2cols="${SCRIPT_DIR}/sql/008_pending_sessions_and_log_columns.sql"
+  if [[ -f "$r2cols" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${r2cols}'"
+    ok "อัปเดตสคีมา pending session / dns_log / log_manifest แล้ว (R2)"
+  else
+    die "ไม่พบ sql/008_pending_sessions_and_log_columns.sql — FAS และ cafe-logger ต้องใช้คอลัมน์ในไฟล์นี้"
+  fi
+
   # แก้บั๊ก (พบตอนตรวจทานรอบ 2): sql/003_partitions.sql มีอยู่ในโปรเจกต์และ Task Board
   # ติ๊กว่าเขียนแล้ว แต่ install.sh ไม่เคยเรียกใช้ไฟล์นี้เลยสักบรรทัด -- เป็น optional
   # ตามที่ comment ในไฟล์บอกไว้ (ไม่มีก็ทำงานถูกต้อง แค่ purge ช้ากว่าเมื่อข้อมูลเยอะมาก)
