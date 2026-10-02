@@ -17,33 +17,36 @@ DELIMITER $$
 -- แปลงตารางที่มีอยู่แล้วให้เป็น partition ตาม "สัปดาห์ ISO" ของ ts
 -- (ปลอดภัยต่อการรันซ้ำ: เช็คก่อนว่ายัง partition หรือยัง)
 DROP PROCEDURE IF EXISTS cafewifi_init_partitions $$
-CREATE PROCEDURE cafewifi_init_partitions()
+DROP PROCEDURE IF EXISTS cafewifi_partition_table $$
+-- แก้บั๊ก (ทดสอบกับ MariaDB 11.8 จริง 2026-10-02): เดิมเขียน
+-- `PARTITION p_start VALUES LESS THAN (TO_DAYS(CURDATE()))` ตรง ๆ ใน ALTER TABLE ซึ่ง MariaDB ไม่รับ
+-- ("Constant, random or timezone-dependent expressions in (sub)partitioning function are not allowed")
+-- --enable-partitions จึงล้มทุกครั้งตั้งแต่แรก -- คำนวณขอบเป็นตัวเลขก่อนแล้วประกอบคำสั่งแบบเดียวกับ
+-- cafewifi_ensure_future_partition ด้านล่าง
+CREATE PROCEDURE cafewifi_partition_table(IN tbl VARCHAR(64))
 BEGIN
     DECLARE already_partitioned INT DEFAULT 0;
 
     SELECT COUNT(*) INTO already_partitioned
     FROM information_schema.PARTITIONS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'conn_log' AND PARTITION_NAME IS NOT NULL;
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = tbl AND PARTITION_NAME IS NOT NULL;
 
     IF already_partitioned = 0 THEN
-        ALTER TABLE conn_log
-            PARTITION BY RANGE (TO_DAYS(ts)) (
-                PARTITION p_start VALUES LESS THAN (TO_DAYS(CURDATE())),
-                PARTITION p_future VALUES LESS THAN MAXVALUE
-            );
+        SET @sql = CONCAT(
+            'ALTER TABLE ', tbl, ' PARTITION BY RANGE (TO_DAYS(ts)) (',
+            'PARTITION p_start VALUES LESS THAN (', TO_DAYS(CURDATE()), '), ',
+            'PARTITION p_future VALUES LESS THAN MAXVALUE)'
+        );
+        PREPARE stmt FROM @sql;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
     END IF;
+END $$
 
-    SELECT COUNT(*) INTO already_partitioned
-    FROM information_schema.PARTITIONS
-    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dns_log' AND PARTITION_NAME IS NOT NULL;
-
-    IF already_partitioned = 0 THEN
-        ALTER TABLE dns_log
-            PARTITION BY RANGE (TO_DAYS(ts)) (
-                PARTITION p_start VALUES LESS THAN (TO_DAYS(CURDATE())),
-                PARTITION p_future VALUES LESS THAN MAXVALUE
-            );
-    END IF;
+CREATE PROCEDURE cafewifi_init_partitions()
+BEGIN
+    CALL cafewifi_partition_table('conn_log');
+    CALL cafewifi_partition_table('dns_log');
 END $$
 
 -- แยก p_future ออกเป็น partition ของสัปดาห์ถัดไป + p_future ใหม่ (REORGANIZE)
