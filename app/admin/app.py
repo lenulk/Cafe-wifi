@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from flask import (Flask, abort, flash, g, redirect, render_template,
                    request, session, url_for)
 
-from common import access, audit, crypto, device_info
+from common import access, audit, crypto, device_info, traffic
 from common.customer import PURGED_MARK, anonymize_customer, retention_hold_until
 from common.db import execute, get_conn, query_all, query_one
 from common.log_mapping import conn_mapping_join, dns_mapping_join
@@ -549,7 +549,7 @@ def dashboard():
           (SELECT COUNT(*) FROM portal_session WHERE state='authenticated' AND ended_at IS NULL) AS online_now
     """) or {}
     recent = query_all("""
-        SELECT v.id, v.username, v.issued_at, v.valid_until, v.status, v.max_devices,
+        SELECT v.id, v.username, v.issued_at, v.valid_until, v.status, v.max_devices, v.quota_mb,
                c.natid_masked, s.username AS issued_by
         FROM voucher v
         JOIN customer c ON c.id = v.customer_id
@@ -557,8 +557,10 @@ def dashboard():
         ORDER BY v.issued_at DESC LIMIT 15
     """)
     devices = _devices_by("id", [r["id"] for r in recent])
+    usage = _usage_by("id", [r["id"] for r in recent])
     for r in recent:
         r["devices"] = devices.get(r["id"], [])
+        r["usage"] = usage.get(r["id"], dict(down=0, up=0, total=0))
     return render_template("dashboard.html", stats=stats, recent=recent, now=datetime.now(),
                            net=_network_overview())
 
@@ -569,10 +571,13 @@ def _network_overview() -> dict:
     leases = device_info.read_leases()
     pool = device_info.dhcp_pool_size()
     online = {r["mac"]: r for r in query_all(
-        "SELECT ps.mac, ps.ip, ps.hostname, ps.os_label, c.natid_masked "
+        "SELECT ps.mac, ps.ip, ps.hostname, ps.os_label, ps.authenticated_at, c.natid_masked "
         "FROM portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
         "LEFT JOIN customer c ON c.id = v.customer_id "
         "WHERE ps.state = 'authenticated' AND ps.ended_at IS NULL")}
+    for on in online.values():  # ใช้ไปเท่าไหร่ในรอบนี้ (ตั้งแต่ได้รับสิทธิ์)
+        up, down = traffic.sum_session_traffic_bytes(query_one, on["mac"], on["authenticated_at"])
+        on["usage"] = dict(down=down, up=up, total=down + up)
     pending = {r["mac"]: r for r in query_all(
         "SELECT mac, code, os_label FROM access_request WHERE status = 'pending' AND expires_at > NOW()")}
     devices = []
@@ -584,11 +589,13 @@ def _network_overview() -> dict:
         devices.append(dict(mac=l["mac"], ip=l["ip"], kind=kind,
                             hostname=l["hostname"] or (on or {}).get("hostname"),
                             os_label=(on or pe or {}).get("os_label"),
-                            natid_masked=(on or {}).get("natid_masked"), code=(pe or {}).get("code")))
+                            natid_masked=(on or {}).get("natid_masked"), code=(pe or {}).get("code"),
+                            usage=(on or {}).get("usage")))
     for mac, on in online.items():  # ได้รับสิทธิ์แต่ไม่อยู่ใน lease (lease เพิ่งหมด/ตั้ง IP เอง) -- ยังนับ
         if mac not in seen:
             devices.append(dict(mac=mac, ip=on["ip"], kind="identified", hostname=on["hostname"],
-                                os_label=on["os_label"], natid_masked=on["natid_masked"], code=None))
+                                os_label=on["os_label"], natid_masked=on["natid_masked"], code=None,
+                                usage=on["usage"]))
     # ยังไม่ระบุตัว: บอกว่าเครื่องนี้เคยใช้สิทธิ์ของใคร (คำใบ้เหมือนหน้าค้นหา log)
     unknown = [d["mac"] for d in devices if d["kind"] == "unknown"]
     if unknown:
@@ -606,8 +613,33 @@ def _network_overview() -> dict:
     devices.sort(key=lambda d: (order[d["kind"]], [int(x) for x in d["ip"].split(".")] if "." in d["ip"] else [0]))
     counts = {k: sum(d["kind"] == k for d in devices) for k in order}
     used = len(leases)
-    return dict(devices=devices, counts=counts, leased=used, pool=pool,
+    total_usage = sum((d["usage"] or {}).get("total", 0) for d in devices if d.get("usage"))
+    return dict(devices=devices, counts=counts, leased=used, pool=pool, total_usage=total_usage,
                 free=(max(pool - used, 0) if pool else None))
+
+
+def _usage_by(column: str, ids: list) -> dict:
+    """ปริมาณเน็ตที่ใช้ไป รวมตาม voucher.id ("id") หรือ voucher.customer_id ("customer_id")
+    -> {key: {down, up, total}} (bytes) · session ที่จบแล้วใช้ยอดที่ cafe-enforce ปิดบัญชีไว้
+    (portal_session.bytes_in/out) ส่วนที่ยังออนไลน์รวมสด ๆ จาก conn_log (นับเมื่อ connection จบ
+    -- ดาวน์โหลดยาว ๆ ที่ยังไม่จบจะยังไม่ขึ้นจนกว่าจะเสร็จ)"""
+    if not ids:
+        return {}
+    assert column in ("id", "customer_id")
+    rows = query_all(
+        f"SELECT v.{column} AS k, ps.mac, ps.state, ps.authenticated_at, ps.ended_at, "
+        "ps.bytes_in, ps.bytes_out FROM portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
+        f"WHERE v.{column} IN ({', '.join(['%s'] * len(ids))}) AND ps.authenticated_at IS NOT NULL",
+        tuple(ids))
+    out: dict = {}
+    for r in rows:
+        if r["state"] == "authenticated" and r["ended_at"] is None:
+            up, down = traffic.sum_session_traffic_bytes(query_one, r["mac"], r["authenticated_at"])
+        else:
+            up, down = int(r["bytes_out"] or 0), int(r["bytes_in"] or 0)
+        u = out.setdefault(r["k"], dict(down=0, up=0, total=0))
+        u["down"] += down; u["up"] += up; u["total"] += down + up
+    return out
 
 
 def _devices_by(column: str, ids: list, per_key: int = 5) -> dict:
@@ -845,8 +877,10 @@ def customers():
             "SELECT id, natid_masked, first_seen, last_seen, visit_count, is_blocked "
             "FROM customer ORDER BY last_seen DESC LIMIT 100")
     devices = _devices_by("customer_id", [r["id"] for r in rows], per_key=3)
+    usage = _usage_by("customer_id", [r["id"] for r in rows])
     for r in rows:
         r["devices"] = devices.get(r["id"], [])
+        r["usage"] = usage.get(r["id"], dict(down=0, up=0, total=0))
     return render_template("customers.html", rows=rows, q=q)
 
 

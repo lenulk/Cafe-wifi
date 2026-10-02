@@ -178,14 +178,26 @@ class FakeCursor:
         # ---- dashboard
         elif s.startswith("select (select count(*) from voucher"):
             self._rows = [dict(active_vouchers=0, customers=len(cust), issued_today=0, online_now=0)]
+        elif s.startswith(("select v.id as k, ps.mac, ps.state", "select v.customer_id as k, ps.mac, ps.state")):
+            key = "id" if s.startswith("select v.id as k") else "customer_id"
+            self._rows = [dict(k=v[key], mac=x["mac"], state=x["state"], ended_at=x.get("ended_at"),
+                               authenticated_at=x.get("authenticated_at") or x["started_at"],
+                               bytes_in=x.get("bytes_in", 0), bytes_out=x.get("bytes_out", 0))
+                          for x in ps for v in vou if v["id"] == x["voucher_id"] and v[key] in args
+                          and x["state"] != "pending"]
+        elif s.startswith("select coalesce(sum(bytes_out),0) as bo"):
+            mac = args[0]
+            self._rows = [dict(bo=sum(c["out"] for c in DB.get("conn", []) if c["mac"] == mac),
+                               bi=sum(c["in"] for c in DB.get("conn", []) if c["mac"] == mac))]
         elif s.startswith(("select v.id as k", "select v.customer_id as k")):
             key = "id" if s.startswith("select v.id as k") else "customer_id"
             self._rows = [dict(k=v[key], mac=x["mac"], hostname=x.get("hostname"),
                                os_label=x.get("os_label"), state=x["state"], ended_at=x.get("ended_at"))
                           for x in reversed(ps) for v in vou if v["id"] == x["voucher_id"] and v[key] in args]
         # ---- dashboard: อุปกรณ์บนเครือข่าย
-        elif s.startswith("select ps.mac, ps.ip, ps.hostname, ps.os_label, c.natid_masked"):
+        elif s.startswith("select ps.mac, ps.ip, ps.hostname, ps.os_label, ps.authenticated_at, c.natid_masked"):
             self._rows = [dict(mac=x["mac"], ip=x["ip"], hostname=x.get("hostname"), os_label=x.get("os_label"),
+                               authenticated_at=x.get("authenticated_at") or x["started_at"],
                                natid_masked=next(c["natid_masked"] for v in vou if v["id"] == x["voucher_id"]
                                                  for c in cust if c["id"] == v["customer_id"]))
                           for x in ps if x["state"] == "authenticated" and not x.get("ended_at")]
@@ -194,7 +206,11 @@ class FakeCursor:
         elif s.startswith("select ps.mac, ps.hostname, ps.os_label, c.natid_masked from portal_session"):
             self._rows = []  # เคยใช้สิทธิ์ของใคร -- เทสต์ชุดนี้ไม่มีประวัติ
         elif s.startswith("select v.id, v.username, v.issued_at"):
-            self._rows = []
+            self._rows = [dict(v, issued_at=v["valid_from"], issued_by="admin",
+                               natid_masked=next(c["natid_masked"] for c in cust if c["id"] == v["customer_id"]))
+                          for v in reversed(vou)]
+        elif s.startswith("select id, natid_masked, first_seen"):
+            self._rows = [dict(c, first_seen=_now(), last_seen=_now()) for c in cust]
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:90]}")
         if self._rows and not self.rowcount:
@@ -658,3 +674,22 @@ def test_dashboard_network_overview_counts_and_lists_devices(fas, admin, tmp_pat
     for n, label in ((1, "ระบุตัวแล้ว"), (1, "รออนุมัติ"), (1, "ยังไม่ระบุตัว"), (148, "IP ว่าง")):
         assert re.search(rf"<b>{n}</b> {label}", html), label
     assert "DESKTOP-7KQ2L" in html and "Old-Phone" not in html
+
+
+
+def test_dashboard_and_customers_show_data_usage(fas, admin, tmp_path, monkeypatch):
+    from common import device_info
+    lease = tmp_path / "u.leases"
+    lease.write_text("0 aa:bb:cc:dd:ee:01 10.10.0.105 Somchais-iPhone *\n")
+    _register(fas)
+    monkeypatch.setattr(device_info, "LEASE_FILE", str(lease))
+    _approve(admin, quota_mb="1000")
+    DB["portal_session"][0]["state"] = "authenticated"
+    DB["conn"] = [dict(mac="AA:BB:CC:DD:EE:01", out=4_000_000, **{"in": 816_000_000})]
+    html = admin.get("/").get_data(as_text=True)
+    assert "820.0 MB" in html and "/ 1.0 GB" in html, "ใช้ไป/โควตา บนแดชบอร์ด"
+    assert "↓ 816.0 MB · ↑ 4.0 MB" in html
+    assert "var(--warn)" in html, "ใช้ 82% ของโควตา = แถบสีเหลือง"
+    assert "ใช้เน็ตรวม <b" in html and html.count("820.0 MB") >= 2, "ทั้งรายการเครื่องออนไลน์และสิทธิ์ล่าสุด"
+    html = admin.get("/customers").get_data(as_text=True)
+    assert "820.0 MB" in html

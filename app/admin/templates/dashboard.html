@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}แดชบอร์ด{% endblock %}
-{% from "_device.html" import device_name %}
+{% from "_device.html" import device_name, usage %}
 {% block body %}
 <h1>ภาพรวม</h1>
 <div class="grid">
@@ -36,13 +36,15 @@
     <span><i class="net-unknown"></i><b>{{ c.unknown }}</b> ยังไม่ระบุตัว (ต่อ Wi-Fi แต่ยังไม่ได้รับสิทธิ์)</span>
     {% if net.pool %}<span><i style="background:var(--line)"></i><b>{{ net.free }}</b> IP ว่าง</span>{% endif %}
   </div>
+  <p style="margin:.6rem 0 0">เครื่องที่ออนไลน์อยู่ใช้เน็ตรวม <b style="font-size:1.2rem">{{ net.total_usage|human_bytes }}</b>
+    <span class="hint">(นับตั้งแต่ได้รับสิทธิ์รอบนี้)</span></p>
 
   {% if net.devices %}
   <details style="margin-top:.75rem" {{ 'open' if net.devices|length <= 10 }}>
     <summary style="cursor:pointer">ดูรายการเครื่อง ({{ net.devices|length }})</summary>
     <div style="overflow-x:auto">
     <table style="margin-top:.5rem">
-      <tr><th>สถานะ</th><th>เครื่อง</th><th>IP</th><th>ลูกค้า</th></tr>
+      <tr><th>สถานะ</th><th>เครื่อง</th><th>IP</th><th>ลูกค้า</th><th>ใช้ไป</th></tr>
       {% for d in net.devices %}
       <tr>
         <td>{% if d.kind == 'identified' %}<span class="badge ok">ระบุตัวแล้ว</span>
@@ -53,6 +55,7 @@
         <td>{% if d.natid_masked %}<span class="mono">{{ d.natid_masked }}</span>
             {% elif d.past_owner %}<span class="hint">เคยใช้สิทธิ์ของ {{ d.past_owner }}</span>
             {% else %}<span class="hint">-</span>{% endif %}</td>
+        <td>{{ usage(d.usage) if d.kind == 'identified' else '' }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -67,7 +70,7 @@
   <h2>สิทธิ์ที่อนุมัติล่าสุด</h2>
   <div style="overflow-x:auto">
   <table>
-    <tr><th>ลูกค้า</th><th>เครื่อง</th><th>เริ่ม</th><th>หมดเวลา</th><th>สถานะ</th><th>ผู้อนุมัติ</th><th></th></tr>
+    <tr><th>ลูกค้า</th><th>เครื่อง</th><th>ใช้เน็ตไป</th><th>เริ่ม</th><th>หมดเวลา</th><th>สถานะ</th><th>ผู้อนุมัติ</th><th></th></tr>
     {% for r in recent %}
     {% set live = r.status == 'active' and r.valid_until > now %}
     <tr>
@@ -77,6 +80,7 @@
         {% else %}<span class="hint">ยังไม่มีเครื่องเข้าใช้</span>{% endfor %}
         <div class="hint">{{ r.devices|length }}/{{ r.max_devices }} เครื่อง</div>
       </td>
+      <td>{{ usage(r.usage, r.quota_mb) }}</td>
       <td>{{ r.issued_at.strftime('%d/%m %H:%M') }}</td>
       <td>{{ r.valid_until.strftime('%d/%m %H:%M') }}</td>
       <td>
@@ -98,7 +102,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="hint">ยังไม่มีการอนุมัติ</td></tr>
+    <tr><td colspan="8" class="hint">ยังไม่มีการอนุมัติ</td></tr>
     {% endfor %}
   </table>
   </div>
