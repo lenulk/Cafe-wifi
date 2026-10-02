@@ -1,40 +1,54 @@
 {% extends "base.html" %}
 {% block title %}แดชบอร์ด{% endblock %}
+{% from "_device.html" import device_name %}
 {% block body %}
 <h1>ภาพรวม</h1>
 <div class="grid">
   <div class="stat"><b>{{ stats.online_now or 0 }}</b><span>กำลังใช้งานอยู่</span></div>
-  <div class="stat"><b>{{ stats.active_vouchers or 0 }}</b><span>รหัสที่ยังใช้ได้</span></div>
+  <div class="stat"><b>{{ stats.active_vouchers or 0 }}</b><span>สิทธิ์ที่ยังใช้ได้</span></div>
   <div class="stat"><b>{{ stats.issued_today or 0 }}</b><span>อนุมัติสิทธิ์ใหม่วันนี้</span></div>
   <div class="stat"><b>{{ stats.customers or 0 }}</b><span>ลูกค้าสะสม</span></div>
 </div>
 
 <div class="card" style="margin-top:1rem">
-  <h2>รหัสที่ออกล่าสุด</h2>
+  <h2>สิทธิ์ที่อนุมัติล่าสุด</h2>
+  <div style="overflow-x:auto">
   <table>
-    <tr><th>รหัส</th><th>ลูกค้า</th><th>ออกเมื่อ</th><th>หมดอายุ</th><th>สถานะ</th><th>ผู้ออก</th><th></th></tr>
+    <tr><th>ลูกค้า</th><th>เครื่อง</th><th>เริ่ม</th><th>หมดเวลา</th><th>สถานะ</th><th>ผู้อนุมัติ</th><th></th></tr>
     {% for r in recent %}
+    {% set live = r.status == 'active' and r.valid_until > now %}
     <tr>
-      <td class="mono">{{ r.username }}</td>
-      <td class="mono">{{ r.natid_masked }}</td>
+      <td class="mono" title="สิทธิ์ {{ r.username }}">{{ r.natid_masked }}</td>
+      <td>
+        {% for d in r.devices %}<div>{{ device_name(d) }}</div>
+        {% else %}<span class="hint">ยังไม่มีเครื่องเข้าใช้</span>{% endfor %}
+        <div class="hint">{{ r.devices|length }}/{{ r.max_devices }} เครื่อง</div>
+      </td>
       <td>{{ r.issued_at.strftime('%d/%m %H:%M') }}</td>
       <td>{{ r.valid_until.strftime('%d/%m %H:%M') }}</td>
-      <td>{{ r.status }}</td>
+      <td>
+        {% if live %}<span class="badge ok">ใช้งานได้</span>
+        {% elif r.status == 'revoked' %}<span class="badge err">ปิดสิทธิ์แล้ว</span>
+        {% elif r.status == 'used_up' %}<span class="badge warn">โควตาหมด</span>
+        {% else %}<span class="badge">หมดเวลา</span>{% endif %}
+      </td>
       <td>{{ r.issued_by }}</td>
       <td>
         {% if r.status == 'active' %}
         <form method="post" action="{{ url_for('revoke_voucher', vid=r.id) }}"
-              onsubmit="return confirm('ยกเลิกรหัส {{ r.username }} ใช่ไหม? ลูกค้าจะหลุดจากเน็ตภายใน 5 นาที')">
+              onsubmit="return confirm('ปิดสิทธิ์ของลูกค้า {{ r.natid_masked }} ใช่ไหม? ทุกเครื่องในสิทธิ์นี้จะหลุดจากเน็ตภายใน 5 นาที
+(ถ้าจะห้ามลูกค้าคนนี้ใช้อีก ให้ไปที่หน้าลูกค้า → ระงับ)')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="ghost" type="submit">ยกเลิก</button>
+          <button class="ghost" type="submit">ปิดสิทธิ์</button>
         </form>
         {% endif %}
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="hint">ยังไม่มีการออกรหัส</td></tr>
+    <tr><td colspan="7" class="hint">ยังไม่มีการอนุมัติ</td></tr>
     {% endfor %}
   </table>
+  </div>
 </div>
 
 <div class="card" style="margin-top:1rem">

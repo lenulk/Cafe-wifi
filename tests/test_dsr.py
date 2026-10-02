@@ -102,6 +102,8 @@ class FakeCursor:
         elif s.startswith("select id, natid_masked, first_seen, last_seen, visit_count, is_blocked "
                           "from customer order by last_seen"):
             self._rows = list(CUSTOMERS)
+        elif s.startswith("select v.customer_id as k"):
+            self._rows = []  # เครื่องที่ลูกค้าเคยใช้ (หน้า /customers)
         elif s.startswith("update customer set natid_hash"):
             cid = args[0]
             match = next((c for c in CUSTOMERS if c["id"] == cid), None)

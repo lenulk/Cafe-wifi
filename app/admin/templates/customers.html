@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}ลูกค้า{% endblock %}
+{% from "_device.html" import device_name %}
 {% block body %}
 <div class="card">
   <h1>ลูกค้า</h1>
@@ -11,10 +12,11 @@
   </form>
 
   <table>
-    <tr><th>ลูกค้า</th><th>ครั้งแรก</th><th>ล่าสุด</th><th>จำนวนครั้ง</th><th></th></tr>
+    <tr><th>ลูกค้า</th><th>เครื่องที่ใช้ล่าสุด</th><th>ครั้งแรก</th><th>ล่าสุด</th><th>จำนวนครั้ง</th><th></th></tr>
     {% for r in rows %}
     <tr>
       <td class="mono">{{ r.natid_masked }}{% if r.is_blocked %} <span class="msg err" style="display:inline;padding:.1rem .4rem">ระงับ</span>{% endif %}</td>
+      <td>{% for d in r.devices %}<div>{{ device_name(d) }}</div>{% else %}<span class="hint">-</span>{% endfor %}</td>
       <td>{{ r.first_seen.strftime('%d/%m/%y') }}</td>
       <td>{{ r.last_seen.strftime('%d/%m/%y %H:%M') if r.last_seen else '-' }}</td>
       <td>{{ r.visit_count }}</td>
@@ -45,7 +47,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="hint">ไม่พบข้อมูล</td></tr>
+    <tr><td colspan="6" class="hint">ไม่พบข้อมูล</td></tr>
     {% endfor %}
   </table>
 </div>

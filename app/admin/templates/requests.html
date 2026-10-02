@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}คำขอใช้งาน{% endblock %}
+{% from "_device.html" import device_name %}
 {% block body %}
 <div class="card">
   <h1>คำขอใช้งานที่รออนุมัติ</h1>
@@ -19,8 +20,8 @@
       <div class="cred" style="font-size:2.2rem;margin:0">{{ r.code }}</div>
       <div>
         <div class="mono">{{ r.natid_masked }}</div>
-        <div title="เครื่องลูกค้าบอกเอง ใช้ถามว่า 'ใช่เครื่องนี้ไหม' ไม่ใช่หลักฐานยืนยันตัวตน">
-          {{ r.os_label or 'ไม่ทราบระบบปฏิบัติการ' }}{% if r.hostname %} · <span class="mono">{{ r.hostname }}</span>{% endif %}</div>
+        <div title="ใช้ถามลูกค้าว่า 'ใช่เครื่องนี้ไหม'" style="font-size:1.1rem">
+          {{ device_name(dict(hostname=r.hostname, os_label=r.os_label, mac=r.mac_tail), link=False) }}</div>
         <div class="hint">เครื่อง …{{ r.mac_tail }} · ขอเมื่อ {{ r.created_at.strftime('%H:%M') }}
           · หมดอายุ {{ r.expires_at.strftime('%H:%M') }}</div>
       </div>
@@ -101,11 +102,12 @@
 <div class="card">
   <h2>ล่าสุด</h2>
   <table>
-    <tr><th>รหัส</th><th>ลูกค้า</th><th>ผล</th><th>โดย</th><th>เวลา</th></tr>
+    <tr><th>รหัสคำขอ</th><th>ลูกค้า</th><th>เครื่อง</th><th>ผล</th><th>โดย</th><th>เวลา</th></tr>
     {% for r in recent %}
     <tr>
       <td class="mono">{{ r.code }}</td>
       <td class="mono">{{ r.natid_masked }}</td>
+      <td>{{ device_name(r, link=False) if (r.hostname or r.os_label) else '-' }}</td>
       <td>{{ 'อนุมัติ' if r.status == 'approved' else 'ปฏิเสธ' }}{% if r.decision_note %} — {{ r.decision_note }}{% endif %}</td>
       <td>{{ r.decided_by or '-' }}</td>
       <td>{{ r.decided_at.strftime('%H:%M') if r.decided_at else '-' }}</td>

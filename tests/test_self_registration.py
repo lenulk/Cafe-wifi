@@ -97,7 +97,7 @@ class FakeCursor:
                                    valid_until=v and v["valid_until"])]
         elif s.startswith("select id, code, mac, hostname, os_label, natid_hash, natid_masked, created_at"):
             self._rows = [r for r in ar if _live_pending(r)]
-        elif s.startswith("select ar.code, ar.natid_masked, ar.status"):
+        elif s.startswith("select ar.code, ar.natid_masked, ar.hostname, ar.os_label, ar.status"):
             self._rows = [dict(r, decided_by="admin") for r in ar
                           if r["status"] in ("approved", "rejected")]
         elif s.startswith("select id, code, mac, ip, hostname, os_label, natid_hash, natid_enc"):
@@ -178,6 +178,11 @@ class FakeCursor:
         # ---- dashboard
         elif s.startswith("select (select count(*) from voucher"):
             self._rows = [dict(active_vouchers=0, customers=len(cust), issued_today=0, online_now=0)]
+        elif s.startswith(("select v.id as k", "select v.customer_id as k")):
+            key = "id" if s.startswith("select v.id as k") else "customer_id"
+            self._rows = [dict(k=v[key], mac=x["mac"], hostname=x.get("hostname"),
+                               os_label=x.get("os_label"), state=x["state"], ended_at=x.get("ended_at"))
+                          for x in reversed(ps) for v in vou if v["id"] == x["voucher_id"] and v[key] in args]
         elif s.startswith("select v.id, v.username, v.issued_at"):
             self._rows = []
         else:
@@ -608,3 +613,14 @@ def test_requests_page_shows_device_and_approval_copies_it_to_session(fas, admin
     _approve(admin)
     (s,) = DB["portal_session"]
     assert s["hostname"] == "Somchais-iPhone" and s["os_label"] == "iPhone · iOS 17.5"
+
+
+def test_dashboard_and_recent_requests_show_device_names(fas, admin):
+    _register(fas)
+    _approve(admin)
+    DB["portal_session"][0]["state"] = "authenticated"
+    html = admin.get("/requests").get_data(as_text=True)
+    assert html.count("Somchais-iPhone") >= 1, "รายการล่าสุดแสดงชื่อเครื่อง"
+    # แดชบอร์ด: ใช้ fake แบบย่อ -- เรียก helper ตรง ๆ ว่าจัดกลุ่ม/ออนไลน์ถูก
+    devs = admin.application.view_functions["dashboard"].__globals__["_devices_by"]("id", [1])
+    assert devs[1][0]["hostname"] == "Somchais-iPhone" and devs[1][0]["online"] is True

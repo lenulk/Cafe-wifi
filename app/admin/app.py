@@ -549,14 +549,41 @@ def dashboard():
           (SELECT COUNT(*) FROM portal_session WHERE state='authenticated' AND ended_at IS NULL) AS online_now
     """) or {}
     recent = query_all("""
-        SELECT v.id, v.username, v.issued_at, v.valid_until, v.status,
+        SELECT v.id, v.username, v.issued_at, v.valid_until, v.status, v.max_devices,
                c.natid_masked, s.username AS issued_by
         FROM voucher v
         JOIN customer c ON c.id = v.customer_id
         JOIN staff s    ON s.id = v.issued_by
         ORDER BY v.issued_at DESC LIMIT 15
     """)
-    return render_template("dashboard.html", stats=stats, recent=recent)
+    devices = _devices_by("id", [r["id"] for r in recent])
+    for r in recent:
+        r["devices"] = devices.get(r["id"], [])
+    return render_template("dashboard.html", stats=stats, recent=recent, now=datetime.now())
+
+
+def _devices_by(column: str, ids: list, per_key: int = 5) -> dict:
+    """เครื่องที่เคยใช้สิทธิ์ จัดกลุ่มตาม voucher.id ("id") หรือ voucher.customer_id ("customer_id")
+    -- ชื่อเครื่อง/OS อ่านง่ายกว่าเลขสิทธิ์ CAFE-xxxxx ที่สุ่มมา · เครื่องเดียวกัน (MAC) นับครั้งเดียว ใหม่สุดก่อน"""
+    if not ids:
+        return {}
+    assert column in ("id", "customer_id")
+    rows = query_all(
+        f"SELECT v.{column} AS k, ps.mac, ps.hostname, ps.os_label, ps.state, ps.ended_at "
+        "FROM portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
+        f"WHERE v.{column} IN ({', '.join(['%s'] * len(ids))}) ORDER BY ps.id DESC", tuple(ids))
+    out: dict = {}
+    for r in rows:
+        lst = out.setdefault(r["k"], [])
+        online = r["state"] == "authenticated" and r["ended_at"] is None
+        same = next((d for d in lst if d["mac"] == r["mac"]), None)
+        if same:
+            same["online"] = same["online"] or online
+            same["hostname"] = same["hostname"] or r["hostname"]
+            same["os_label"] = same["os_label"] or r["os_label"]
+        elif len(lst) < per_key:
+            lst.append(dict(mac=r["mac"], hostname=r["hostname"], os_label=r["os_label"], online=online))
+    return out
 
 
 # ---------------------------------------------------------------- คำขอใช้งาน (แทนการออกรหัส)
@@ -611,7 +638,7 @@ def requests_page():
                                 expires_at=r["expires_at"], customer=cust, voucher=voucher,
                                 devices_used=used))
     recent = query_all(
-        "SELECT ar.code, ar.natid_masked, ar.status, ar.decided_at, ar.decision_note, "
+        "SELECT ar.code, ar.natid_masked, ar.hostname, ar.os_label, ar.status, ar.decided_at, ar.decision_note, "
         "s.username AS decided_by FROM access_request ar LEFT JOIN staff s ON s.id = ar.decided_by "
         "WHERE ar.status IN ('approved','rejected') ORDER BY ar.decided_at DESC LIMIT 10")
     return render_template("requests.html", pending=pending, recent=recent,
@@ -769,6 +796,9 @@ def customers():
         rows = query_all(
             "SELECT id, natid_masked, first_seen, last_seen, visit_count, is_blocked "
             "FROM customer ORDER BY last_seen DESC LIMIT 100")
+    devices = _devices_by("customer_id", [r["id"] for r in rows], per_key=3)
+    for r in rows:
+        r["devices"] = devices.get(r["id"], [])
     return render_template("customers.html", rows=rows, q=q)
 
 
@@ -813,10 +843,10 @@ def revoke_voucher(vid: int):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE voucher SET status='revoked' WHERE id=%s AND status='active'", (vid,))
         if not cur.rowcount:
-            abort(404, "ไม่พบ voucher นี้ หรือถูกยกเลิก/หมดอายุไปแล้ว")
+            abort(404, "ไม่พบสิทธิ์นี้ หรือถูกปิด/หมดอายุไปแล้ว")
         audit.log_required(audit.REVOKE_VOUCHER, staff_id=session["staff_id"],
                            target=f"voucher:{vid}", client_ip=g.client_ip, cursor=cur)
-    flash("ยกเลิก voucher เรียบร้อย", "success")
+    flash("ปิดสิทธิ์แล้ว — เครื่องที่ออนไลน์อยู่จะหลุดภายใน 5 นาที", "success")
     return redirect(url_for("dashboard"))
 
 

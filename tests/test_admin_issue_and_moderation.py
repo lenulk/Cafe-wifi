@@ -214,7 +214,7 @@ def test_dashboard_renders_with_revoke_button_for_active_voucher(client):
     """สโมคเทสต์: dashboard.html ต้อง render ได้จริงกับ v.id คอลัมน์ใหม่ (ไม่ใช่แค่ backend)"""
     _seed_voucher()
     html = client.get("/").get_data(as_text=True)
-    assert "ยกเลิก" in html
+    assert "ปิดสิทธิ์" in html
     vid = next(iter(VOUCHERS))
     assert f"/vouchers/{vid}/revoke" in html
 
