@@ -616,6 +616,11 @@ install_packages() {
   local pkgs=(python buildtools git curl openssl mariadb nginx chrony iproute)
   (( SKIP_NETWORK )) || pkgs+=(dnsmasq nftables conntrack tcpdump)
   (( SKIP_OPENNDS )) || pkgs+=(microhttpd php)
+  # Pi ไม่มี RTC: ถ้าไม่มีตัวนี้ systemd เริ่มนาฬิกาทุกบูตจาก mtime ของ
+  # /var/lib/systemd/timesync/clock ซึ่ง chrony ไม่เคยแตะ (บน Pi จริงค้างที่ 2026-09-16 14:20 ทุกบูต
+  # จนถึง 2 ต.ค. -- ผิดไป 16 วัน) fake-hwclock บันทึกเวลาทุกชั่วโมง + ตอนปิดเครื่อง แล้วคืนตอนบูต
+  # ถ้า NTP ไม่มาภายในเพดาน 180 วิ ของ chrony-wait (N23) log จะผิดแค่เท่ากับเวลาที่ไฟดับ ไม่ใช่หลายวัน
+  [[ "$PKG" == apt ]] && pkgs+=(fake-hwclock)
   pkg_install "${pkgs[@]}"
   ok "ติดตั้งแพ็กเกจเสร็จ"
 }
