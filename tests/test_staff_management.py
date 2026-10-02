@@ -351,3 +351,20 @@ def test_temp_password_generator_always_meets_policy():
         pw = crypto.gen_temp_staff_password()
         assert not crypto.check_admin_password(pw), pw
         assert re.fullmatch(r"[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}", pw)
+
+
+# ---------------------------------------------------------------- หน้าแอดมินเปิดให้วงลูกค้า: จำกัดต่อชื่อผู้ใช้
+def test_login_limited_per_username_even_when_ip_changes(app_mod):
+    """ลูกค้าขอ IP ใหม่ได้เรื่อย ๆ -- เดารหัสของบัญชีเดียวจากหลาย IP ต้องโดนล็อกด้วย"""
+    app_mod._attempts.clear()
+    codes = []
+    for i in range(12):
+        c = _client(app_mod)
+        codes.append(c.post("/login", data=dict(username="owner", password="wrong"),
+                            headers={"X-Real-IP": f"10.10.0.{100 + i}"}).status_code)
+    assert codes[:10] == [401] * 10 and codes[10:] == [429, 429]
+    # รหัสถูกก็ยังเข้าไม่ได้จนกว่าจะพ้น 10 นาที (กันเดาต่อ) -- บัญชีอื่นยังเข้าได้ตามปกติ
+    c = _client(app_mod)
+    assert _login(c, "owner", ADMIN_PW).status_code == 429
+    app_mod._attempts.clear()
+    assert _login(c, "owner", ADMIN_PW).status_code == 302

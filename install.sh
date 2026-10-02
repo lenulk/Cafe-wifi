@@ -1251,8 +1251,13 @@ table inet filter {
     ip saddr \$CLIENT_NET tcp dport ${FAS_PORT} accept
     ip saddr \$CLIENT_NET tcp dport 80 accept
 
-    # T8: Admin Panel และ SSH ต้องเข้าจากฝั่งลูกค้าไม่ได้ (มาก่อนกฎ accept ทั่วไปด้านล่างเสมอ)
-    ip saddr \$CLIENT_NET tcp dport ${ADMIN_PORT} drop
+    # Admin Panel เปิดให้วงลูกค้า (เปลี่ยนจาก T8 เดิม -- เจ้าของโครงงานเลือก 2026-10-02): ร้านจริงมีแค่
+    # เราเตอร์ + Pi สายเดียว หลังปิด DHCP ของเราเตอร์ เครื่องพนักงานได้ IP วงลูกค้าเหมือนทุกคน ถ้าบล็อก
+    # พนักงานจะเข้าหน้าแอดมินไม่ได้เลย -- ป้องกันด้วย HTTPS + รหัสผ่านรายคน + จำกัดการเดารหัสต่อ IP
+    # และต่อชื่อผู้ใช้ (admin/app.py) + audit ทุกครั้งที่ login ไม่ผ่าน · ลูกค้าเปิด https://cafe.wifi:8443 เห็น
+    # หน้า login ได้ (ความเสี่ยงที่ยอมรับ)
+    ip saddr \$CLIENT_NET tcp dport ${ADMIN_PORT} accept
+    # SSH ยังห้ามจากฝั่งลูกค้าเสมอ (ดูแลเครื่องผ่านหน้าแอดมิน หรือเสียบจอ/คีย์บอร์ดที่ Pi)
     ip saddr \$CLIENT_NET tcp dport 22 drop
 
     # จากฝั่งเราเตอร์/อัพลิงก์ (คนละ source กับ CLIENT_NET) อนุญาต SSH + Admin ตามปกติ

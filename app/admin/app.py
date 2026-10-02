@@ -67,6 +67,10 @@ if not os.environ.get("SECRET_KEY"):
 _attempts: dict[str, list[float]] = {}
 MAX_ATTEMPTS = 5
 WINDOW_SEC = 600
+# หน้าแอดมินเปิดให้วงลูกค้าเข้าได้ (เจ้าของโครงงานเลือก 2026-10-02: ร้านจริงมีแค่เราเตอร์ + Pi เครื่อง
+# พนักงานได้ IP วงลูกค้าเหมือนทุกคน) -- ลูกค้าขอ IP ใหม่/ปลอม MAC ได้เรื่อย ๆ การจำกัดต่อ IP อย่างเดียว
+# จึงไม่พอ ต้องจำกัดต่อ "ชื่อผู้ใช้" ด้วย (สูงกว่าต่อ IP หน่อย กันลูกค้าแกล้งล็อกบัญชีพนักงานง่ายเกินไป)
+MAX_USER_ATTEMPTS = 10
 
 
 # ---------------------------------------------------------------- helpers
@@ -87,11 +91,11 @@ def client_ip() -> str:
     return real_ip
 
 
-def rate_limited(bucket: str) -> bool:
+def rate_limited(bucket: str, limit: int = MAX_ATTEMPTS) -> bool:
     now = time.time()
     hits = [t for t in _attempts.get(bucket, []) if now - t < WINDOW_SEC]
     _attempts[bucket] = hits
-    return len(hits) >= MAX_ATTEMPTS
+    return len(hits) >= limit
 
 
 def record_attempt(bucket: str) -> None:
@@ -331,13 +335,14 @@ def login():
         return render_template("login.html")
 
     ip = g.client_ip or "unknown"
-    if rate_limited(f"login:{ip}"):
-        audit.log(audit.LOGIN_FAIL, target="rate-limited", client_ip=ip)
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    user_bucket = f"login-user:{username.lower()[:64]}"
+    if rate_limited(f"login:{ip}") or rate_limited(user_bucket, MAX_USER_ATTEMPTS):
+        audit.log(audit.LOGIN_FAIL, target="rate-limited", client_ip=ip, detail=f"user={username[:64]}")
         return render_template("login.html",
                                error="พยายามเข้าสู่ระบบมากเกินไป รอ 10 นาทีแล้วลองใหม่"), 429
 
-    username = (request.form.get("username") or "").strip()
-    password = request.form.get("password") or ""
     row = query_one(
         "SELECT id, username, password_hash, display_name, role, is_active, "
         "must_change_password, password_changed_at "
@@ -345,6 +350,7 @@ def login():
 
     if not row or not row["is_active"] or not crypto.verify_password(row["password_hash"], password):
         record_attempt(f"login:{ip}")
+        record_attempt(user_bucket)
         audit.log(audit.LOGIN_FAIL, target=username, client_ip=ip)
         # ข้อความเดียวกันทุกกรณี ไม่บอกใบ้ว่าชื่อผู้ใช้มีจริงไหม
         return render_template("login.html", error="ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"), 401
