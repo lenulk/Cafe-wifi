@@ -58,7 +58,7 @@ def _run(monkeypatch, row, clients):
     import tools.enforce_voucher_expiry as enforce
     cur = _FakeCursor([row])
     deauthed = []
-    monkeypatch.setattr(rp, "gateway_clients", lambda: clients)
+    monkeypatch.setattr(rp, "gateway_clients", lambda macs: clients)
     monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
     monkeypatch.setattr(rp, "purge_orphan_claims", lambda: 0)
     monkeypatch.setattr(rp.audit, "log", lambda *a, **k: None)
@@ -131,7 +131,7 @@ def test_reauth_closes_old_session_and_charges_its_voucher(monkeypatch):
             return None
 
     cur = ReauthCursor([row])
-    monkeypatch.setattr(rp, "gateway_clients", lambda: clients)
+    monkeypatch.setattr(rp, "gateway_clients", lambda macs: clients)
     monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
     monkeypatch.setattr(rp, "purge_orphan_claims", lambda: 0)
     monkeypatch.setattr(rp.audit, "log", lambda *a, **k: None)
@@ -146,3 +146,46 @@ def test_reauth_closes_old_session_and_charges_its_voucher(monkeypatch):
     assert len(closes) == 1 and closes[0][1] == (opened, "reauth", 3_000_000, 2_000_000, old["id"])
     assert len(bumps) == 1 and bumps[0][1] == (5, old["voucher_id"])
     assert row["voucher_id"] != old["voucher_id"]
+
+
+def test_no_pending_does_not_touch_ndsctl(monkeypatch):
+    """ไม่มี pending = ไม่เรียก ndsctl เลย (ndsctl json ยึด openNDS ~1.1 วิต่อลูกค้า)"""
+    called = []
+    cur = _FakeCursor([])
+    monkeypatch.setattr(rp, "gateway_clients", lambda macs: called.append(macs) or {})
+    monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
+    monkeypatch.setattr(rp, "purge_orphan_claims", lambda: 0)
+    assert rp.run() == (0, 0)
+    assert called == []
+
+
+def test_gateway_clients_queries_each_pending_mac(monkeypatch):
+    import json as _json
+    import tools.enforce_voucher_expiry as enforce
+    calls = []
+
+    class R:
+        returncode = 0
+
+        def __init__(self, out):
+            self.stdout = out
+
+    def fake(cmd, timeout=10):
+        calls.append(cmd)
+        mac = cmd[-1]
+        return R(b"{}" if mac.endswith("99") else _json.dumps({"mac": mac, "state": "Authenticated"}).encode())
+
+    monkeypatch.setattr(enforce, "run_ndsctl", fake)
+    got = rp.gateway_clients({"AA:BB:CC:DD:EE:01", "aa:bb:cc:dd:ee:99"})
+    assert calls == [["ndsctl", "json", "aa:bb:cc:dd:ee:01"], ["ndsctl", "json", "aa:bb:cc:dd:ee:99"]]
+    assert set(got) == {"aa:bb:cc:dd:ee:01"}
+
+
+def test_gateway_clients_failure_is_none(monkeypatch):
+    import tools.enforce_voucher_expiry as enforce
+
+    class R:
+        returncode, stdout = 4, b""
+
+    monkeypatch.setattr(enforce, "run_ndsctl", lambda cmd, timeout=10: R())
+    assert rp.gateway_clients({"AA:BB:CC:DD:EE:01"}) is None

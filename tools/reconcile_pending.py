@@ -12,16 +12,29 @@ from common.db import get_conn
 log = logging.getLogger("cafe-wifi.reconcile_pending")
 
 
-def gateway_clients() -> dict | None:
-    try:
-        from tools.enforce_voucher_expiry import run_ndsctl
-        result = run_ndsctl(["ndsctl", "json"])  # ลองใหม่เองเมื่อ openNDS ตอบ busy (exit 4)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, "ndsctl json")
-        return (json.loads(result.stdout.decode(errors="replace")) or {}).get("clients", {})
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        log.error("อ่านสถานะ openNDS ไม่ได้: %s", exc)
-        return None
+def gateway_clients(macs) -> dict | None:
+    """สถานะใน openNDS ของ MAC ที่ระบุ (key = MAC ตัวพิมพ์เล็ก) -- คืน None ถ้าอ่านตัวใดตัวหนึ่งไม่ได้
+
+    ถามทีละ MAC ด้วย `ndsctl json <mac>` ไม่ใช่ `ndsctl json` ทั้งก้อน -- วัดบน Pi จริง 2026-10-02:
+    ทั้งก้อนใช้ ~0.27 + 1.1 วินาทีต่อลูกค้าหนึ่งคน (ลูกค้า 3 คน = 3.5 วิ, ร้าน 30 คน ≈ 34 วิ เกิน timeout
+    10 วิ -> อ่านไม่ได้ทุกรอบ ลูกค้าใหม่ทุกคนค้าง pending ตลอดไป authenticated_at ว่าง log โยงหาตัวคน
+    ไม่ได้) และระหว่างนั้น openNDS ตอบ busy กับคำสั่งอื่นทั้งหมด (deauth ของ cafe-enforce ด้วย)
+    ทีละ MAC ใช้ ~1.4 วิ และปกติมี pending พร้อมกันแค่ 0-2 เครื่อง
+    """
+    from tools.enforce_voucher_expiry import run_ndsctl
+    clients: dict = {}
+    for mac in sorted({m.lower() for m in macs}):
+        try:
+            result = run_ndsctl(["ndsctl", "json", mac])  # ลองใหม่เองเมื่อ openNDS ตอบ busy (exit 4)
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, f"ndsctl json {mac}")
+            data = json.loads(result.stdout.decode(errors="replace") or "{}") or {}
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            log.error("อ่านสถานะ openNDS ไม่ได้: %s", exc)
+            return None
+        if data:  # `{}` = openNDS ไม่รู้จัก MAC นี้
+            clients[mac] = data
+    return clients
 
 
 def confirmed_at(client: dict | None, ip: str, started_at: datetime) -> datetime | None:
@@ -56,7 +69,12 @@ def purge_orphan_claims() -> int:
 
 
 def run() -> tuple[int, int]:
-    clients = gateway_clients()
+    # ถาม openNDS เฉพาะเมื่อมี pending จริง (ส่วนใหญ่ของเวลาไม่มี) -- ไม่ยึด ndsctl ไว้ทุก 5 วิโดยเปล่า
+    # ประโยชน์ และอ่านนอก transaction เพื่อไม่ถือ lock ของ portal_session ไว้ระหว่างรอ ndsctl
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT ps.mac FROM portal_session ps WHERE ps.state='pending'")
+        pending_macs = {r["mac"] for r in cur.fetchall()}
+    clients = gateway_clients(pending_macs) if pending_macs else {}
     promoted = expired = 0
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM fas_context WHERE expires_at < "
@@ -76,7 +94,7 @@ def run() -> tuple[int, int]:
             # วินาทีสุดท้ายของ pending ถูกเปิดสิทธิ์ไปแล้ว ต้องไม่ถูกตัดทิ้งว่า auth_timeout
             gateway_start = None
             if clients is not None:
-                client = clients.get(row["mac"].lower()) or clients.get(row["mac"].upper())
+                client = clients.get(row["mac"].lower())
                 gateway_start = confirmed_at(client, row["ip"], row["started_at"])
             if gateway_start is None and row["pending_until"] <= datetime.now():
                 from tools.enforce_voucher_expiry import deauth_mac

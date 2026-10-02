@@ -213,7 +213,9 @@ def authenticated_macs(ndsctl_bin: str = "ndsctl") -> set[str] | None:
     if not _running_as_root():
         cmd = ["sudo", "-n", *cmd]
     try:
-        r = run_ndsctl(cmd)
+        # `ndsctl json` ทั้งก้อนใช้ ~1.1 วิต่อลูกค้า (วัดบน Pi จริง 2026-10-02) -- 10 วิเดิมพอแค่ ~8 คน
+        # ร้านที่มีลูกค้าเยอะกว่านั้นจะ timeout ทุกรอบและ session ที่หลุดไปแล้วไม่เคยถูกปิด
+        r = run_ndsctl(cmd, timeout=180)
         if r.returncode != 0:
             log.warning("ndsctl json ไม่สำเร็จ (exit %d) -- ข้ามการตรวจ session ที่หลุดไปแล้วรอบนี้",
                        r.returncode)
