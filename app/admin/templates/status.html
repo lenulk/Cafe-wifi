@@ -4,6 +4,113 @@
 <h1>สถานะระบบ (System Health)</h1>
 <p class="hint">อัปเดตล่าสุด {{ generated_at.strftime('%d/%m/%Y %H:%M:%S') }} — หน้านี้คำนวณสดทุกครั้งที่โหลด ไม่แคช</p>
 
+<style>
+  .meter{height:12px;background:var(--line);border-radius:6px;overflow:hidden;margin:.35rem 0 .2rem}
+  .meter>div{height:100%;border-radius:6px;transition:width .4s}
+  .big{font-size:1.9rem;font-weight:700;line-height:1.1}
+  .speed{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:.75rem;text-align:center}
+  .speed div{border:1px solid var(--line);border-radius:10px;padding:.6rem}
+  .speed b{display:block;font-size:1.6rem}
+</style>
+{% macro meter(pct) -%}
+  {%- set p = pct or 0 -%}
+  <div class="meter"><div style="width:{{ p }}%;background:{{ 'var(--err)' if p >= 90 else 'var(--warn)' if p >= 70 else 'var(--ok)' }}"></div></div>
+{%- endmacro %}
+
+<div class="grid">
+  <div class="card" style="margin:0">
+    <h2 style="margin:0">CPU</h2>
+    <div class="big" id="cpu-val">{{ res.cpu if res.cpu is not none else '—' }}%</div>
+    <div id="cpu-bar">{{ meter(res.cpu) }}</div>
+    <div class="hint" id="cpu-hint">{{ res.cores }} คอร์{% if res.load %} · load {{ res.load[0] }}{% endif %}{% if res.temp is not none %} · {{ res.temp }}°C{% endif %}</div>
+  </div>
+  <div class="card" style="margin:0">
+    <h2 style="margin:0">RAM</h2>
+    <div class="big" id="mem-val">{{ res.mem.percent if res.mem else '—' }}%</div>
+    <div id="mem-bar">{{ meter(res.mem.percent if res.mem else 0) }}</div>
+    <div class="hint" id="mem-hint">{% if res.mem %}ใช้ {{ res.mem.used|human_bytes }} จาก {{ res.mem.total|human_bytes }}{% endif %}</div>
+  </div>
+  <div class="card" style="margin:0">
+    <h2 style="margin:0">อินเทอร์เน็ต</h2>
+    <div class="big" id="inet-val">{% if inet.online %}<span style="color:var(--ok)">● เชื่อมต่อได้</span>{% else %}<span style="color:var(--err)">● ขาดการเชื่อมต่อ</span>{% endif %}</div>
+    <div class="hint" id="inet-hint">
+      {% if inet.online %}ตอบสนอง {{ inet.latency_ms }} ms{% endif %}
+      {% if inet.dns_ok %} · DNS {{ inet.dns_ms }} ms{% elif inet.error %}{{ inet.error }}{% endif %}
+      {% if inet.route %}<br>ออกทาง {{ inet.route.iface }} ผ่าน {{ inet.route.gateway }}{% endif %}
+    </div>
+  </div>
+</div>
+<p class="hint" style="margin:.4rem 0 1rem">ทำงานต่อเนื่องมาแล้ว <span id="uptime">{% if res.uptime %}{{ res.uptime // 86400 }} วัน {{ (res.uptime % 86400) // 3600 }} ชม. {{ (res.uptime % 3600) // 60 }} นาที{% else %}—{% endif %}</span>
+  · CPU/RAM/เน็ต อัปเดตเองทุก 10 วินาที</p>
+
+<div class="card">
+  <h2>ทดสอบความเร็วอินเทอร์เน็ต</h2>
+  <p class="hint">วัดความเร็วสายเน็ตของร้านที่ Pi ต่ออยู่ (ทดสอบกับ speed.cloudflare.com ใช้เวลาราว 15–20 วินาที)
+    · ระหว่างทดสอบลูกค้าอาจเน็ตช้าลงชั่วครู่ · กดได้ครั้งละ 1 นาที</p>
+  <button type="button" id="speed-btn">เริ่มทดสอบความเร็ว</button>
+  <span class="hint" id="speed-msg" style="margin-left:.5rem"></span>
+  <div class="speed">
+    <div><span class="hint">ดาวน์โหลด</span><b id="sp-down">{{ speed.down_mbps if speed.down_mbps is not none else '—' }}</b><span class="hint">Mbps</span></div>
+    <div><span class="hint">อัปโหลด</span><b id="sp-up">{{ speed.up_mbps if speed.up_mbps is not none else '—' }}</b><span class="hint">Mbps</span></div>
+    <div><span class="hint">ปิง</span><b id="sp-ping">{{ speed.ping_ms if speed.ping_ms is not none else '—' }}</b><span class="hint">ms</span></div>
+  </div>
+  <p class="hint" id="sp-at" style="margin-top:.5rem">{% if speed.at %}ทดสอบล่าสุด {{ speed.at }}{% else %}ยังไม่เคยทดสอบตั้งแต่เปิดระบบ{% endif %}</p>
+</div>
+
+<script>
+(function () {
+  function color(p) { return p >= 90 ? 'var(--err)' : p >= 70 ? 'var(--warn)' : 'var(--ok)'; }
+  function bar(id, p) {
+    var el = document.querySelector('#' + id + ' .meter > div');
+    if (el && p != null) { el.style.width = p + '%'; el.style.background = color(p); }
+  }
+  function human(n) {
+    var u = [['GB', 1e9], ['MB', 1e6], ['KB', 1e3]];
+    for (var i = 0; i < u.length; i++) if (n >= u[i][1]) return (n / u[i][1]).toFixed(1) + ' ' + u[i][0];
+    return n + ' B';
+  }
+  function set(id, html) { var el = document.getElementById(id); if (el) el.innerHTML = html; }
+  function refresh() {
+    fetch('{{ url_for("status_live") }}', {credentials: 'same-origin'}).then(function (r) { return r.json(); })
+      .then(function (d) {
+        var r = d.res, n = d.inet;
+        if (r.cpu != null) { set('cpu-val', r.cpu + '%'); bar('cpu-bar', r.cpu); }
+        set('cpu-hint', r.cores + ' คอร์' + (r.load ? ' · load ' + r.load[0] : '') + (r.temp != null ? ' · ' + r.temp + '°C' : ''));
+        if (r.mem) { set('mem-val', r.mem.percent + '%'); bar('mem-bar', r.mem.percent);
+                     set('mem-hint', 'ใช้ ' + human(r.mem.used) + ' จาก ' + human(r.mem.total)); }
+        set('inet-val', n.online ? '<span style="color:var(--ok)">● เชื่อมต่อได้</span>'
+                                 : '<span style="color:var(--err)">● ขาดการเชื่อมต่อ</span>');
+        var h = (n.online ? 'ตอบสนอง ' + n.latency_ms + ' ms' : '') +
+                (n.dns_ok ? ' · DNS ' + n.dns_ms + ' ms' : (n.error ? n.error : ''));
+        if (n.route) h += '<br>ออกทาง ' + n.route.iface + ' ผ่าน ' + n.route.gateway;
+        set('inet-hint', h);
+      }).catch(function () {});
+  }
+  setInterval(refresh, 10000);
+
+  var btn = document.getElementById('speed-btn');
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    set('speed-msg', 'กำลังทดสอบ… (ราว 15–20 วินาที อย่าปิดหน้านี้)');
+    fetch('{{ url_for("status_speedtest") }}', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'X-CSRF-Token': '{{ csrf_token() }}'}
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ok) {
+        set('sp-down', d.down_mbps != null ? d.down_mbps : '—');
+        set('sp-up', d.up_mbps != null ? d.up_mbps : '—');
+        set('sp-ping', d.ping_ms != null ? d.ping_ms : '—');
+        set('sp-at', 'ทดสอบล่าสุด ' + d.at);
+        set('speed-msg', d.error ? d.error : 'เสร็จแล้ว');
+      } else {
+        set('speed-msg', d.error || 'ทดสอบไม่สำเร็จ');
+      }
+    }).catch(function () { set('speed-msg', 'ทดสอบไม่สำเร็จ (เครือข่ายขัดข้อง หรือใช้เวลานานเกินไป)'); })
+      .finally(function () { btn.disabled = false; });
+  });
+})();
+</script>
+
 <div class="card">
   <h2>พื้นที่ดิสก์</h2>
   <table>

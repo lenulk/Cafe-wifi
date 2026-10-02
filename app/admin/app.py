@@ -21,10 +21,10 @@ from functools import wraps
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import (Flask, abort, flash, g, redirect, render_template,
+from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
 
-from common import access, audit, crypto, device_info, traffic
+from common import access, audit, crypto, device_info, sysinfo, traffic
 from common.customer import PURGED_MARK, anonymize_customer, retention_hold_until
 from common.db import execute, get_conn, query_all, query_one
 from common.log_mapping import conn_mapping_join, dns_mapping_join
@@ -231,7 +231,25 @@ def health():
 def status_page():
     from common.health import build_status
     data = build_status(str(LOG_DIR))
-    return render_template("status.html", **data)
+    return render_template("status.html", res=sysinfo.resources(), inet=sysinfo.internet_status(),
+                           speed=sysinfo.last_speed_test(), **data)
+
+
+@app.get("/status/live")
+@login_required
+def status_live():
+    """CPU/RAM/อุณหภูมิ/เน็ต สำหรับหน้า /status รีเฟรชเองทุก 10 วินาที (ไม่ต้องโหลดทั้งหน้า)"""
+    return jsonify(res=sysinfo.resources(), inet=sysinfo.internet_status())
+
+
+@app.post("/status/speedtest")
+@login_required
+def status_speedtest():
+    result = sysinfo.run_speed_test()
+    if result.get("ok"):
+        audit.log("speed_test", staff_id=session["staff_id"], client_ip=g.client_ip,
+                  detail=f"ping={result['ping_ms']}ms down={result['down_mbps']} up={result['up_mbps']} Mbps")
+    return jsonify(result), (200 if result.get("ok") else 429 if result.get("retry_in") else 502)
 
 
 # ---------------------------------------------------------------- setup wizard

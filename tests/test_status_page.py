@@ -235,6 +235,16 @@ def client(tmp_path, monkeypatch):
 
     import common.db as db
     monkeypatch.setattr(db, "get_conn", lambda: contextlib.nullcontext(FakeConn()))
+    # ไม่แตะเครือข่าย/ไฟล์ระบบจริงในเทสต์
+    from common import sysinfo
+    monkeypatch.setattr(sysinfo, "resources", lambda: dict(
+        cpu=12.5, cores=4, load=(0.33, 0.3, 0.2), temp=67.2, uptime=93784,
+        mem=dict(total=4_000_000_000, used=1_000_000_000, percent=25.0)))
+    monkeypatch.setattr(sysinfo, "internet_status", lambda: dict(
+        online=True, latency_ms=104, dns_ok=True, dns_ms=12, error=None,
+        route=dict(iface="eth0", gateway="172.20.18.1")))
+    monkeypatch.setattr(sysinfo, "run_speed_test", lambda: dict(
+        ok=True, ping_ms=9, down_mbps=187.3, up_mbps=45.1, at="02/10 17:30:00"))
 
     def _run(sql, args=()):
         cur = FakeCursor()
@@ -293,3 +303,22 @@ def test_health_json_endpoint_unchanged(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.get_json()["status"] == "ok"
+
+
+
+def test_status_page_shows_cpu_ram_internet_and_speed_button(client):
+    _login(client)
+    html = client.get("/status").get_data(as_text=True)
+    assert "12.5%" in html and "4 คอร์" in html and "67.2°C" in html
+    assert "25.0%" in html and "ใช้ 1.0 GB จาก 4.0 GB" in html
+    assert "เชื่อมต่อได้" in html and "104 ms" in html and "ออกทาง eth0 ผ่าน 172.20.18.1" in html
+    assert "เริ่มทดสอบความเร็ว" in html and "1 วัน 2 ชม. 3 นาที" in html
+
+
+def test_status_live_and_speedtest_endpoints(client):
+    assert client.get("/status/live").status_code == 302, "ต้อง login"
+    _login(client)
+    live = client.get("/status/live").get_json()
+    assert live["res"]["cpu"] == 12.5 and live["inet"]["online"] is True
+    r = client.post("/status/speedtest")
+    assert r.status_code == 200 and r.get_json()["down_mbps"] == 187.3
