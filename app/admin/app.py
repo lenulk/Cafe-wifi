@@ -1036,8 +1036,38 @@ def search_logs():
     audit.log_required(audit.SEARCH_LOG, staff_id=session["staff_id"], client_ip=g.client_ip,
                        detail=detail)
     rows = query_all(sql, tuple(args + [LOGS_PAGE_SIZE + 1, (page - 1) * LOGS_PAGE_SIZE]))
-    ctx.update(rows=rows[:LOGS_PAGE_SIZE], has_next=len(rows) > LOGS_PAGE_SIZE, searched=True)
+    has_next = len(rows) > LOGS_PAGE_SIZE
+    rows = rows[:LOGS_PAGE_SIZE]
+    _add_unidentified_hints(rows)
+    ctx.update(rows=rows, has_next=has_next, searched=True)
     return render_template("logs_search.html", error=None, **ctx)
+
+
+def _add_unidentified_hints(rows) -> None:
+    """แถวที่ "ยังไม่ระบุตัว" (เครื่องไม่ได้รับสิทธิ์ตอนนั้น เช่น ก่อนอนุมัติ หรือหลังถูกปิดสิทธิ์) ใส่ r["hint"]
+    บอกว่าเครื่อง (MAC) นี้เคยใช้/ต่อมาได้สิทธิ์ของใคร -- **แสดงประกอบบนเว็บเท่านั้น** ไม่ผูกแถวนั้นกับ
+    ลูกค้าจริง (ไม่ลง CSV/ไฟล์หลักฐาน) เพราะตอนเกิดแถวนั้นเครื่องไม่ได้ใช้สิทธิ์ของใครเลย"""
+    pending = [r for r in rows if not r.get("natid_masked") and r.get("mac")]
+    macs = sorted({r["mac"] for r in pending})
+    if not macs:
+        return
+    sessions = query_all(
+        "SELECT ps.mac, ps.authenticated_at, ps.ended_at, ps.hostname, ps.os_label, c.natid_masked "
+        "FROM portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
+        "LEFT JOIN customer c ON c.id = v.customer_id "
+        f"WHERE ps.mac IN ({', '.join(['%s'] * len(macs))}) AND ps.authenticated_at IS NOT NULL "
+        "ORDER BY ps.authenticated_at DESC", tuple(macs))
+    for r in pending:
+        t = r.get("started_at") or r["ts"]
+        mine = [s for s in sessions if s["mac"] == r["mac"]]
+        if any(s["authenticated_at"] <= t and (s["ended_at"] is None or t <= s["ended_at"]) for s in mine):
+            continue  # มี session ครอบเวลานี้แต่จับคู่ไม่ได้แน่ชัด (ซ้อนกัน/IP ไม่ตรง) -- ไม่ชี้นำว่าเป็นของใคร
+        before = next((s for s in mine if s["authenticated_at"] <= t), None)   # ใหม่สุดก่อนแถวนี้
+        after = next((s for s in reversed(mine) if s["authenticated_at"] > t), None)  # แรกสุดหลังแถวนี้
+        s, when = (before, "เคยใช้สิทธิ์ของ") if before else (after, "ต่อมาได้รับสิทธิ์ของ")
+        if s:
+            r["hint"] = dict(hostname=s["hostname"], os_label=s["os_label"],
+                             natid_masked=s["natid_masked"], when=when)
 
 
 LOGS_CSV_MAX = 5000

@@ -95,6 +95,17 @@ class FakeCursor:
         elif s.startswith("insert into audit_log"):
             AUDIT.append(args)
             self.rowcount = 1
+        elif s.startswith("select ps.mac, ps.authenticated_at, ps.ended_at, ps.hostname"):
+            out = []
+            for x in SESSIONS:
+                if x["mac"] not in args or x["authenticated_at"] is None:
+                    continue
+                v = next((v for v in VOUCHERS if v["id"] == x["voucher_id"]), None)
+                c = next((c for c in CUSTOMERS if v and c["id"] == v["customer_id"]), None)
+                out.append(dict(mac=x["mac"], authenticated_at=x["authenticated_at"], ended_at=x["ended_at"],
+                                hostname=x.get("hostname"), os_label=x.get("os_label"),
+                                natid_masked=c and c["natid_masked"]))
+            self._rows = sorted(out, key=lambda r: r["authenticated_at"], reverse=True)
         elif s.startswith("select id from customer where natid_hash"):
             self._rows = [c for c in CUSTOMERS if c["natid_hash"] == args[0]]
         elif "from conn_log cl" in s:
@@ -323,7 +334,7 @@ def test_overlapping_sessions_do_not_claim_a_person_twice(client):
                          authenticated_at=datetime(2026, 8, 1, 9, 0), ended_at=None))
     html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
     assert html.count(">93.184.216.34<") == 1, "แถวเดียว ไม่ซ้ำ"
-    assert "ยังไม่ระบุตัว" in html and "1-2345-XXXXX-XX-3" not in html
+    assert "ยังไม่ได้รับสิทธิ์" in html and "1-2345-XXXXX-XX-3" not in html
     html = client.get("/logs", query_string=_q(identified="1")).get_data(as_text=True)
     assert "93.184.216.34" not in html, "ติ๊ก 'เฉพาะที่ระบุตัวได้' ต้องซ่อนแถวที่ไม่รู้เจ้าของ"
 
@@ -477,3 +488,32 @@ def test_csv_includes_device_columns(client):
     _conn(0)
     body = client.get("/logs", query_string=_q(format="csv")).get_data(as_text=True)
     assert "device_hostname" in body.splitlines()[0] and "Somchais-iPhone" in body
+
+
+# ---------------------------------------------------------------- แถวที่เครื่องไม่ได้รับสิทธิ์
+def test_unidentified_row_hints_previous_owner_of_same_device(client):
+    """หลังถูกปิดสิทธิ์ เครื่องยังส่ง DNS/เปิด portal -- บอกว่าเครื่องนี้เคยใช้สิทธิ์ของใคร แต่ไม่ผูกแถวกับลูกค้า"""
+    _login_as(client, "admin")
+    SESSIONS[0]["ended_at"] = datetime(2026, 8, 1, 9, 0)
+    try:
+        _conn(30, dst="10.10.0.1", dst_port=53, proto="udp")   # 10:30 -- หลัง session จบ
+        html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
+        assert "ยังไม่ได้รับสิทธิ์" in html and "Somchais-iPhone" in html
+        assert "เคยใช้สิทธิ์ของ 1-2345-XXXXX-XX-3" in html
+        html = client.get("/logs", query_string=_q(identified="1")).get_data(as_text=True)
+        assert "10.10.0.1" not in html, "คำใบ้ไม่ทำให้แถวนับเป็น 'ระบุตัวได้'"
+        body = client.get("/logs", query_string=_q(format="csv")).get_data(as_text=True)
+        assert "1-2345-XXXXX-XX-3" not in body, "CSV/หลักฐานไม่ใส่คำใบ้"
+    finally:
+        SESSIONS[0]["ended_at"] = datetime(2026, 8, 3, 0, 0)
+
+
+def test_unidentified_row_before_approval_hints_later_owner(client):
+    _login_as(client, "admin")
+    SESSIONS[0]["authenticated_at"] = datetime(2026, 8, 1, 11, 0)
+    try:
+        _conn(0, dst="10.10.0.1", dst_port=53, proto="udp")    # 10:00 -- ก่อนอนุมัติ
+        html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
+        assert "ต่อมาได้รับสิทธิ์ของ 1-2345-XXXXX-XX-3" in html
+    finally:
+        SESSIONS[0]["authenticated_at"] = datetime(2026, 8, 1, 0, 0)

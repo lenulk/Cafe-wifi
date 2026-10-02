@@ -16,6 +16,14 @@
     {{ find(r.voucher_username) }}
   {%- endif -%}
 {%- endmacro %}
+{% macro unidentified(r, why) -%}
+  <span class="muted" title="{{ why }}">ยังไม่ได้รับสิทธิ์</span>
+  {%- if r.hint %}<br>
+    {%- if r.hint.hostname %}{{ find(r.hint.hostname) }}{% elif r.hint.os_label %}{{ r.hint.os_label }}{% endif %}
+    <div class="hint" title="ข้อมูลประกอบจากเครื่อง (MAC) เดียวกัน — แถวนี้เกิดตอนเครื่องไม่ได้ใช้สิทธิ์ของใคร จึงไม่นับเป็นของลูกค้าคนนี้">
+      {{ r.hint.when }} {{ r.hint.natid_masked or '-' }}</div>
+  {%- endif %}
+{%- endmacro %}
 {% block body %}
 <style>
   .tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--line);margin:-.25rem 0 1rem}
@@ -102,7 +110,8 @@
     <tr>
       <td>{{ r.ts.strftime('%d/%m %H:%M:%S') }}</td>
       <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ device(r) }}
-          {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือเป็นคำตอบของ DNS">ยังไม่ระบุตัว</span>{% endif %}</td>
+          {% elif r.event_kind == 'answer' %}<span class="muted">คำตอบ DNS</span>
+          {% else %}{{ unidentified(r, "ก่อนได้รับอนุมัติ หรือหลังถูกปิดสิทธิ์/หมดเวลา") }}{% endif %}</td>
       <td>{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
       <td>{{ find(r.qname) }}</td>
       <td>{{ r.qtype or ('คำตอบ' if r.event_kind == 'answer' else '-') }}</td>
@@ -117,7 +126,7 @@
       <td>{% if r.started_at %}{% set sec = ((r.ts - r.started_at).total_seconds())|int %}
           {{ (sec // 60) ~ ' นาที' if sec >= 60 else (sec ~ ' วิ') }}{% else %}-{% endif %}</td>
       <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ device(r) }}
-          {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือจับคู่ได้ไม่แน่นอน">ยังไม่ระบุตัว</span>{% endif %}</td>
+          {% else %}{{ unidentified(r, "ก่อนได้รับอนุมัติ หรือหลังถูกปิดสิทธิ์/หมดเวลา หรือจับคู่ได้ไม่แน่นอน") }}{% endif %}</td>
       <td>{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
       <td>{{ find(r.dst_ip) }}<span class="muted">:{{ r.dst_port or '-' }} {{ r.proto }}</span></td>
       <td>{{ r.bytes_out|human_bytes }} / {{ r.bytes_in|human_bytes }}</td>
