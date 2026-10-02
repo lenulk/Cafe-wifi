@@ -45,6 +45,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -174,6 +175,24 @@ def find_sessions_to_close(query_all_fn) -> list[dict]:
     """)
 
 
+# openNDS รับคำสั่ง ndsctl ได้ทีละคำสั่ง ถ้ามีอีกตัวถืออยู่จะตอบ "ndsctl thread is busy, please try
+# later." exit 4 ทันที -- พบบน Pi จริง 2026-10-02: พอมี cafe-reconcile เรียก `ndsctl json` ทุก 5 วินาที
+# ~11% ของการเรียกโดน busy และ deauth ของ voucher ที่ถูกยกเลิกล้มติดกันหลายรอบ (ลูกค้ายังใช้เน็ตต่อได้)
+NDSCTL_BUSY = 4
+NDSCTL_BUSY_RETRIES = 20
+NDSCTL_BUSY_DELAY = 0.25
+
+
+def run_ndsctl(cmd: list[str], timeout: float = 10):
+    """subprocess.run ของ ndsctl ที่ลองใหม่เมื่อ openNDS ตอบ busy (exit 4) -- รอรวมไม่เกิน ~5 วินาที"""
+    for attempt in range(NDSCTL_BUSY_RETRIES):
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if r.returncode != NDSCTL_BUSY:
+            return r
+        time.sleep(NDSCTL_BUSY_DELAY)
+    return r
+
+
 def _running_as_root() -> bool:
     """เช็คว่ารันด้วยสิทธิ์ root อยู่แล้วไหม -- แยกเป็นฟังก์ชันเพราะ Windows (เครื่องพัฒนา)
     ไม่มี os.geteuid เลย ถ้าเรียกตรง ๆ จะ AttributeError และเทสต์ก็ mock ตรงนี้ได้ง่ายกว่า"""
@@ -194,7 +213,7 @@ def authenticated_macs(ndsctl_bin: str = "ndsctl") -> set[str] | None:
     if not _running_as_root():
         cmd = ["sudo", "-n", *cmd]
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=10)
+        r = run_ndsctl(cmd)
         if r.returncode != 0:
             log.warning("ndsctl json ไม่สำเร็จ (exit %d) -- ข้ามการตรวจ session ที่หลุดไปแล้วรอบนี้",
                        r.returncode)
@@ -252,7 +271,7 @@ def deauth_mac(mac: str, ndsctl_bin: str = "ndsctl") -> bool:
     if not _running_as_root():
         cmd = ["sudo", "-n", *cmd]
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=10)
+        r = run_ndsctl(cmd)
         out = (getattr(r, "stdout", b"") or b"").decode(errors="replace") + (r.stderr or b"").decode(errors="replace")
         if r.returncode != 0 and "not found" in out.lower():
             # N28: openNDS ไม่มีเครื่องนี้อยู่แล้ว (ลูกค้าเดินออกไป หลุดเพราะ idle timeout หรือยังไม่

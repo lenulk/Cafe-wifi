@@ -549,3 +549,37 @@ def test_find_sessions_gone_picks_only_macs_not_in_opennds():
 def test_find_sessions_gone_is_case_insensitive():
     rows = [{"id": 1, "mac": "AA:BB:CC:DD:EE:01", "voucher_id": 3, "started_at": datetime.now()}]
     assert ev.find_sessions_gone(lambda sql, args=(): rows, {"aa:bb:cc:dd:ee:01".upper()}) == []
+
+
+def test_ndsctl_busy_is_retried_until_success(monkeypatch):
+    """openNDS ตอบ busy (exit 4) เมื่อมี ndsctl อีกตัวถืออยู่ (cafe-reconcile ทุก 5 วิ) -- ต้องลองใหม่
+    ไม่ใช่ปล่อยให้ลูกค้าที่ถูกยกเลิกใช้เน็ตต่อ (พบบน Pi จริง 2026-10-02)"""
+    codes = iter([4, 4, 0])
+    calls = []
+
+    class R:
+        def __init__(self, rc):
+            self.returncode, self.stdout, self.stderr = rc, b"", b""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return R(next(codes))
+
+    monkeypatch.setattr(ev.subprocess, "run", fake_run)
+    monkeypatch.setattr(ev.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ev.shutil, "which", lambda b: "/usr/bin/ndsctl")
+    monkeypatch.setattr(ev, "_running_as_root", lambda: True)
+    assert ev.deauth_mac("AA:BB:CC:DD:EE:FF") is True
+    assert len(calls) == 3
+
+
+def test_ndsctl_busy_forever_gives_up(monkeypatch):
+    class R:
+        returncode, stdout, stderr = 4, b"", b"ndsctl thread is busy"
+
+    monkeypatch.setattr(ev.subprocess, "run", lambda cmd, **kw: R())
+    monkeypatch.setattr(ev.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ev.shutil, "which", lambda b: "/usr/bin/ndsctl")
+    monkeypatch.setattr(ev, "_running_as_root", lambda: True)
+    assert ev.deauth_mac("AA:BB:CC:DD:EE:FF") is False
+    assert ev.authenticated_macs() is None

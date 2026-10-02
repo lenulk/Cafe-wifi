@@ -14,9 +14,11 @@ log = logging.getLogger("cafe-wifi.reconcile_pending")
 
 def gateway_clients() -> dict | None:
     try:
-        result = subprocess.run(["ndsctl", "json"], capture_output=True, text=True,
-                                timeout=10, check=True)
-        return (json.loads(result.stdout) or {}).get("clients", {})
+        from tools.enforce_voucher_expiry import run_ndsctl
+        result = run_ndsctl(["ndsctl", "json"])  # ลองใหม่เองเมื่อ openNDS ตอบ busy (exit 4)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, "ndsctl json")
+        return (json.loads(result.stdout.decode(errors="replace")) or {}).get("clients", {})
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         log.error("อ่านสถานะ openNDS ไม่ได้: %s", exc)
         return None
