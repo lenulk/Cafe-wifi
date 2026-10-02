@@ -19,6 +19,8 @@
       <div class="cred" style="font-size:2.2rem;margin:0">{{ r.code }}</div>
       <div>
         <div class="mono">{{ r.natid_masked }}</div>
+        <div title="เครื่องลูกค้าบอกเอง ใช้ถามว่า 'ใช่เครื่องนี้ไหม' ไม่ใช่หลักฐานยืนยันตัวตน">
+          {{ r.os_label or 'ไม่ทราบระบบปฏิบัติการ' }}{% if r.hostname %} · <span class="mono">{{ r.hostname }}</span>{% endif %}</div>
         <div class="hint">เครื่อง …{{ r.mac_tail }} · ขอเมื่อ {{ r.created_at.strftime('%H:%M') }}
           · หมดอายุ {{ r.expires_at.strftime('%H:%M') }}</div>
       </div>

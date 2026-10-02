@@ -43,7 +43,8 @@ DEVICES = [
 SESSIONS = [
     {"mac": "AA:BB:CC:DD:EE:01", "ip": "10.10.0.105", "voucher_id": 1,
      "authenticated_at": datetime(2026, 8, 1, 0, 0),
-     "ended_at": datetime(2026, 8, 3, 0, 0)},
+     "ended_at": datetime(2026, 8, 3, 0, 0),
+     "hostname": "Somchais-iPhone", "os_label": "iPhone · iOS 17.5"},
 ]
 CONN_LOGS: list[dict] = []
 DNS_LOGS: list[dict] = []
@@ -65,12 +66,14 @@ def _lookup_mapping(mac, ip, ts):
                   and s["authenticated_at"] <= ts
                   and (s["ended_at"] is None or ts <= s["ended_at"])]
     if len(candidates) != 1:
-        return None, None, None
-    v = next((v for v in VOUCHERS if v["id"] == candidates[0]["voucher_id"]), None)
+        return None, None, None, None, None
+    ps = candidates[0]
+    dev = (ps.get("hostname"), ps.get("os_label"))
+    v = next((v for v in VOUCHERS if v["id"] == ps["voucher_id"]), None)
     if v:
         c = next((c for c in CUSTOMERS if c["id"] == v["customer_id"]), None)
-        return v["username"], (c["natid_masked"] if c else None), (c["id"] if c else None)
-    return None, None, None
+        return (v["username"], (c["natid_masked"] if c else None), (c["id"] if c else None)) + dev
+    return (None, None, None) + dev
 
 
 def _norm(sql: str) -> str:
@@ -125,14 +128,21 @@ class FakeCursor:
         if "and (dl.client_ip = %s or dl.answer = %s)" in s:
             ip = args[idx]; idx += 2
             preds.append(lambda r, m: ip in (r["client_ip"], r.get("answer")))
-        if "and dl.qname like %s" in s:
+        # ชื่อเว็บ/ชื่อเครื่อง -- ต่อกันด้วย OR ในวงเล็บเดียว ตามลำดับ hostname, qname/dst_ip
+        alts = []
+        if "ps.hostname like %s" in s:
+            host = args[idx].strip("%").lower(); idx += 1
+            alts.append(lambda r, m: host in (m[3] or "").lower())
+        if "dl.qname like %s" in s:
             dom = args[idx].strip("%"); idx += 1
-            preds.append(lambda r, m: dom in r["qname"])
-        if "and cl.dst_ip in (select d2.answer from dns_log d2" in s:
+            alts.append(lambda r, m: dom in r["qname"])
+        if "cl.dst_ip in (select d2.answer from dns_log d2" in s:
             dom, w0, w1 = args[idx].strip("%"), args[idx + 1], args[idx + 2]; idx += 3
             ips = {d.get("answer") for d in DNS_LOGS if dom in d["qname"]
                    and d.get("event_kind") == "answer" and w0 <= d["ts"] <= w1}
-            preds.append(lambda r, m: r["dst_ip"] in ips)
+            alts.append(lambda r, m: r["dst_ip"] in ips)
+        if alts:
+            preds.append(lambda r, m: any(a(r, m) for a in alts))
         if "and v.id is not null" in s:
             preds.append(lambda r, m: m[0] is not None)
         if "and dl.event_kind = 'query'" in s:
@@ -147,7 +157,8 @@ class FakeCursor:
             if pred(r, m):
                 out.append(dict(r, event_kind=r.get("event_kind", "query"),
                                 started_at=r.get("started_at"),
-                                voucher_username=m[0], natid_masked=m[1]))
+                                voucher_username=m[0], natid_masked=m[1],
+                                device_hostname=m[3], device_os=m[4]))
         return out[offset:offset + limit]
 
     def _search_conn(self, s, args):
@@ -416,3 +427,39 @@ def test_conn_log_maps_owner_by_start_time_not_destroy_time(client):
         FakeCursor._search_conn = orig
     assert "s.authenticated_at <= coalesce(cl.started_at, cl.ts)" in captured[0]
     assert "coalesce(cl.started_at, cl.ts) <= s.ended_at" in captured[0]
+
+
+# ---------------------------------------------------------------- ชื่อเครื่อง + ระบบปฏิบัติการ
+def test_results_show_device_hostname_and_os(client):
+    _login_as(client, "admin")
+    _conn(0)
+    html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
+    assert "Somchais-iPhone" in html and "iPhone · iOS 17.5" in html
+    assert "q=Somchais-iPhone" in html, "คลิกชื่อเครื่องเพื่อค้นต่อได้"
+
+
+def test_search_by_hostname(client):
+    _login_as(client, "admin")
+    _conn(0)
+    _conn(5, mac="11:22:33:44:55:66", src="10.10.0.200", dst="1.1.1.1")
+    html = client.get("/logs", query_string=_q(q="somchais-iphone")).get_data(as_text=True)
+    assert "93.184.216.34" in html and "1.1.1.1" not in html
+    assert "ชื่อเครื่องลูกค้าและชื่อเว็บ" in html
+    assert "kind=name" in AUDIT[0][4]
+
+
+def test_word_without_dot_matches_hostname_or_domain_in_dns_tab(client):
+    _login_as(client, "admin")
+    _dns(0, "www.example.com", None)
+    _dns(1, "ads.tracker.net", None)
+    html = client.get("/logs", query_string=_q(log_type="dns", q="tracker")).get_data(as_text=True)
+    assert "ads.tracker.net" in html and "www.example.com" not in html
+    html = client.get("/logs", query_string=_q(log_type="dns", q="Somchais")).get_data(as_text=True)
+    assert "ads.tracker.net" in html and "www.example.com" in html, "ชื่อเครื่องตรง = ทุกแถวของเครื่องนั้น"
+
+
+def test_csv_includes_device_columns(client):
+    _login_as(client, "admin")
+    _conn(0)
+    body = client.get("/logs", query_string=_q(format="csv")).get_data(as_text=True)
+    assert "device_hostname" in body.splitlines()[0] and "Somchais-iPhone" in body

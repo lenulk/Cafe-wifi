@@ -769,6 +769,15 @@ SQL
     die "ไม่พบ sql/010_access_request.sql — portal และหน้าอนุมัติต้องใช้ตารางนี้"
   fi
 
+  # ชื่อเครื่อง + ระบบปฏิบัติการของลูกค้า
+  local devinfo="${SCRIPT_DIR}/sql/011_device_info.sql"
+  if [[ -f "$devinfo" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${devinfo}'"
+    ok "เพิ่มคอลัมน์ชื่อเครื่อง/ระบบปฏิบัติการแล้ว"
+  else
+    die "ไม่พบ sql/011_device_info.sql — portal และหน้าอนุมัติต้องใช้คอลัมน์ในไฟล์นี้"
+  fi
+
 
   # แก้บั๊ก (พบตอนตรวจทานรอบ 2): sql/003_partitions.sql มีอยู่ในโปรเจกต์และ Task Board
   # ติ๊กว่าเขียนแล้ว แต่ install.sh ไม่เคยเรียกใช้ไฟล์นี้เลยสักบรรทัด -- เป็น optional

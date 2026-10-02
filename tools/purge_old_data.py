@@ -130,13 +130,16 @@ def run(retention_days: int | None = None, customer_retention_days: int | None =
             lambda sql, args=(): (cur.execute(sql, args), cur.fetchone())[1],
             _exec, cust_cutoff, max(retention_days, customer_retention_days))
         _exec("DELETE FROM voucher_reveal WHERE expires_at < NOW()", ())
+        # คำขอใช้งานเก่า (มี natid_masked/ชื่อเครื่อง/User-Agent) -- เก็บเท่าอายุ log พอ
+        # ร่องรอยการอนุมัติยังอยู่ใน audit_log
+        n_req = _exec("DELETE FROM access_request WHERE created_at < %s", (log_cutoff,))
 
     summary = PurgeSummary(conn_log_deleted=n_conn, dns_log_deleted=n_dns,
                            customers_deleted=n_cust, cutoff_logs=log_cutoff,
                            cutoff_customers=cust_cutoff)
 
     audit.log("purge_old_data", detail=(
-        f"conn_log=-{n_conn} dns_log=-{n_dns} customer_anonymized={n_cust} "
+        f"conn_log=-{n_conn} dns_log=-{n_dns} customer_anonymized={n_cust} access_request=-{n_req} "
         f"log_cutoff={log_cutoff.isoformat()} customer_cutoff={cust_cutoff.isoformat()}"
     ))
     log.info("purge เสร็จ: conn_log -%d, dns_log -%d, customer anonymized %d", n_conn, n_dns, n_cust)

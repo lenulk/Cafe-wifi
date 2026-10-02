@@ -30,7 +30,7 @@ echo "nameserver \$dns" > /etc/netns/$ns/resolv.conf
 echo "\$ip" > /tmp/client-$ns.ip
 S
   chmod +x /tmp/udhcpc-$ns.sh
-  ip netns exec $ns busybox udhcpc -i eth0 -q -n -t 5 -s /tmp/udhcpc-$ns.sh >/dev/null 2>&1
+  ip netns exec $ns busybox udhcpc -i eth0 -x hostname:Lab-$ns-Phone -q -n -t 5 -s /tmp/udhcpc-$ns.sh >/dev/null 2>&1
   echo "$ns ip=$(cat /tmp/client-$ns.ip 2>/dev/null) mac=$mac" ;;
 down)
   ip netns del $ns 2>/dev/null; rm -rf /etc/netns/$ns /tmp/udhcpc-$ns.sh /tmp/client-$ns.ip /tmp/cj-$ns; echo "$ns removed" ;;

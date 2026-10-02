@@ -4,6 +4,13 @@
   {# คลิกค่าในตารางเพื่อค้นต่อด้วยค่านั้น (ช่วงเวลา/แท็บเดิม) #}
   <a class="mono" href="{{ url_for('search_logs', **dict(params, q=value, page=1)) }}">{{ label or value }}</a>
 {%- endmacro %}
+{% macro device(r) -%}
+  {# ชื่อเครื่อง/OS ที่เครื่องลูกค้าบอกเอง (ปลอมได้) -- แสดงประกอบ ไม่ใช่หลักฐาน #}
+  {%- if r.device_hostname or r.device_os -%}
+  <div title="เครื่องลูกค้าบอกเอง ใช้ประกอบเท่านั้น">{% if r.device_hostname %}{{ find(r.device_hostname) }}{% endif %}
+    {%- if r.device_os %}<span class="muted">{{ ' · ' if r.device_hostname }}{{ r.device_os }}</span>{% endif %}</div>
+  {%- endif -%}
+{%- endmacro %}
 {% block body %}
 <style>
   .tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--line);margin:-.25rem 0 1rem}
@@ -36,7 +43,7 @@
     <input type="hidden" name="log_type" value="{{ params.log_type }}">
     <div class="searchrow">
       <input type="text" name="q" value="{{ params.q }}" autofocus autocomplete="off"
-             placeholder="เลขบัตร 13 หลัก · CAFE-xxxxx · MAC · IP · ชื่อเว็บ (เว้นว่าง = ทั้งหมด)">
+             placeholder="เลขบัตร 13 หลัก · CAFE-xxxxx · MAC · IP · ชื่อเครื่อง · ชื่อเว็บ (เว้นว่าง = ทั้งหมด)">
       <button type="submit" style="width:auto">ค้นหา</button>
     </div>
 
@@ -91,7 +98,7 @@
       <td>{{ r.ts.strftime('%d/%m %H:%M:%S') }}</td>
       <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
           {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือเป็นคำตอบของ DNS">ยังไม่ระบุตัว</span>{% endif %}</td>
-      <td>{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
+      <td>{{ device(r) }}{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
       <td>{{ find(r.qname) }}</td>
       <td>{{ r.qtype or ('คำตอบ' if r.event_kind == 'answer' else '-') }}</td>
       <td>{% if r.answer %}{{ find(r.answer) }}{% else %}-{% endif %}</td>
@@ -106,7 +113,7 @@
           {{ (sec // 60) ~ ' นาที' if sec >= 60 else (sec ~ ' วิ') }}{% else %}-{% endif %}</td>
       <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
           {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือจับคู่ได้ไม่แน่นอน">ยังไม่ระบุตัว</span>{% endif %}</td>
-      <td>{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
+      <td>{{ device(r) }}{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
       <td>{{ find(r.dst_ip) }}<span class="muted">:{{ r.dst_port or '-' }} {{ r.proto }}</span></td>
       <td>{{ r.bytes_out|human_bytes }} / {{ r.bytes_in|human_bytes }}</td>
     </tr>

@@ -30,6 +30,8 @@ def test_anonymize_customer_writes_expected_sql_and_returns_rowcount():
 
     n = anonymize_customer(fake_exec, 42)
     assert n == 1
+    assert [c[0].split()[1] for c in calls[1:]] == ["portal_session", "access_request"],         "ชื่อเครื่องอาจมีชื่อจริง -- ต้องล้างพร้อมเลขบัตร"
+    assert all("hostname = NULL" in c[0] and c[1] == (42,) for c in calls[1:])
     sql, args = calls[0]
     assert sql.upper().startswith("UPDATE CUSTOMER SET NATID_HASH")
     assert "NATID_MASKED = 'PURGED'" in sql.upper()
@@ -37,8 +39,9 @@ def test_anonymize_customer_writes_expected_sql_and_returns_rowcount():
 
 
 def test_anonymize_customer_passes_through_zero_rowcount_when_not_found():
-    n = anonymize_customer(lambda sql, args=(): 0, 999)
-    assert n == 0
+    calls = []
+    n = anonymize_customer(lambda sql, args=(): calls.append(sql) or 0, 999)
+    assert n == 0 and len(calls) == 1, "ไม่พบลูกค้า = ไม่ต้องไปแตะตารางอื่น"
 
 
 # ================================================================== ส่วนที่ 2: route /customers/<id>/erase ผ่าน Flask
@@ -53,6 +56,7 @@ STAFF = [
 ]
 CUSTOMERS: list[dict] = []
 AUDIT: list[tuple] = []
+HOSTNAME_CLEARED: list = []
 
 
 def _reset():
@@ -69,6 +73,7 @@ def _reset():
         "last_seen": datetime(2026, 7, 1), "visit_count": 1, "is_blocked": 0,
     })
     AUDIT.clear()
+    HOSTNAME_CLEARED.clear()
 
 
 LAST_ACTIVITY = [datetime.now() - timedelta(days=400)]  # N33: ค่าเริ่มต้น = พ้นระยะเก็บแล้ว
@@ -107,6 +112,8 @@ class FakeCursor:
                 self.rowcount = 1
             else:
                 self.rowcount = 0
+        elif s.startswith(("update portal_session ps join voucher", "update access_request ar join voucher")):
+            HOSTNAME_CLEARED.append(args[0])  # ชื่อเครื่องอาจมีชื่อจริง -- ล้างพร้อมเลขบัตร
         elif s.startswith("select greatest("):
             # N33: กิจกรรมล่าสุดของลูกค้า -- ค่าเริ่มต้นตั้งให้เก่ากว่าระยะเก็บ (ลบได้) เทสต์ที่
             # ต้องการกรณี "ยังลบไม่ได้" จะเซ็ต LAST_ACTIVITY ให้เป็นวันที่ใกล้ ๆ เอง
@@ -221,6 +228,7 @@ def test_erase_success_anonymizes_and_logs_audit(client):
     assert row["natid_enc"] == b""
     assert row["natid_hash"] == "PURGED-1"
 
+    assert HOSTNAME_CLEARED == [1, 1], "ต้องล้างชื่อเครื่องทั้งใน portal_session และ access_request"
     assert len(AUDIT) == 1
     assert AUDIT[0][1] == "erase_customer"
     assert AUDIT[0][2] == "customer:1"

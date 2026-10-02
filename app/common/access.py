@@ -28,7 +28,8 @@ def gen_request_code(cur) -> str:
     raise RuntimeError("สุ่มรหัสคำขอไม่ซ้ำไม่ได้")
 
 
-def reserve_pending_session(cur, voucher: dict, mac: str, ip: str) -> tuple[str | None, int | None]:
+def reserve_pending_session(cur, voucher: dict, mac: str, ip: str, hostname: str | None = None,
+                            os_label: str | None = None) -> tuple[str | None, int | None]:
     """จอง MAC + โควตาจำนวนเครื่องของ voucher แล้วสร้าง portal_session แบบ pending
 
     คืน (None, portal_session_id) ถ้าสำเร็จ หรือ (ข้อความที่ต้องบอกผู้ใช้, None) ถ้าปฏิเสธ -- ผู้เรียกต้อง rollback เอง (R2-01: ถ้าออกจาก get_conn() ปกติจะ commit แถว
@@ -56,9 +57,9 @@ def reserve_pending_session(cur, voucher: dict, mac: str, ip: str) -> tuple[str 
         return (f"สิทธิ์นี้ใช้ครบ {voucher['max_devices']} เครื่องแล้ว "
                 "ต้องปิดสิทธิ์เครื่องเดิมหรือหมดเวลาก่อน"), None
     cur.execute("INSERT INTO portal_session "
-                "(voucher_id, mac, ip, started_at, pending_until, state) "
-                f"VALUES (%s,%s,%s,NOW(),DATE_ADD(NOW(), INTERVAL {PENDING_SECONDS} SECOND),'pending')",
-                (voucher["id"], mac, ip))
+                "(voucher_id, mac, ip, hostname, os_label, started_at, pending_until, state) "
+                f"VALUES (%s,%s,%s,%s,%s,NOW(),DATE_ADD(NOW(), INTERVAL {PENDING_SECONDS} SECOND),'pending')",
+                (voucher["id"], mac, ip, hostname, os_label))
     session_id = cur.lastrowid
     cur.execute("UPDATE pending_mac_claim SET portal_session_id=%s WHERE mac=%s", (session_id, mac))
     return None, session_id

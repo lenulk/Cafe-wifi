@@ -79,8 +79,9 @@ class FakeCursor:
         elif s.startswith("select id from access_request where code=%s"):
             self._rows = [r for r in ar if r["code"] == args[0] and _live_pending(r)]
         elif s.startswith("insert into access_request"):
-            code, mac, ip, h, enc, masked = args
-            ar.append(dict(id=len(ar) + 1, code=code, mac=mac, ip=ip, natid_hash=h, natid_enc=enc,
+            code, mac, ip, host, os_label, ua, h, enc, masked = args
+            ar.append(dict(id=len(ar) + 1, code=code, mac=mac, ip=ip, hostname=host, os_label=os_label,
+                           user_agent=ua, natid_hash=h, natid_enc=enc,
                            natid_masked=masked, consent_at=_now(), status="pending",
                            created_at=_now(), expires_at=_now() + timedelta(minutes=15),
                            decided_at=None, decided_by=None, decision_note=None, voucher_id=None,
@@ -94,12 +95,12 @@ class FakeCursor:
                 v = next((x for x in vou if x["id"] == r["voucher_id"]), None)
                 self._rows = [dict(r, session_state=sess and sess["state"],
                                    valid_until=v and v["valid_until"])]
-        elif s.startswith("select id, code, mac, natid_hash, natid_masked, created_at"):
+        elif s.startswith("select id, code, mac, hostname, os_label, natid_hash, natid_masked, created_at"):
             self._rows = [r for r in ar if _live_pending(r)]
         elif s.startswith("select ar.code, ar.natid_masked, ar.status"):
             self._rows = [dict(r, decided_by="admin") for r in ar
                           if r["status"] in ("approved", "rejected")]
-        elif s.startswith("select id, code, mac, ip, natid_hash, natid_enc"):
+        elif s.startswith("select id, code, mac, ip, hostname, os_label, natid_hash, natid_enc"):
             self._rows = [r for r in ar if r["id"] == args[0]]
         elif s.startswith("select code, natid_masked from access_request"):
             self._rows = [r for r in ar if r["id"] == args[0] and r["status"] == "pending"]
@@ -162,8 +163,9 @@ class FakeCursor:
             hit |= any(x["voucher_id"] == vid and x["mac"] == mac and x["state"] == "pending" for x in ps)
             self._rows = [{"1": 1}] if hit else []
         elif s.startswith("insert into portal_session"):
-            vid, mac, ip = args
-            ps.append(dict(id=len(ps) + 1, voucher_id=vid, mac=mac, ip=ip, state="pending",
+            vid, mac, ip, host, os_label = args
+            ps.append(dict(id=len(ps) + 1, voucher_id=vid, mac=mac, ip=ip, hostname=host,
+                           os_label=os_label, state="pending",
                            started_at=_now()))
             self.lastrowid = len(ps)
         # ---- staff / audit
@@ -226,10 +228,15 @@ def _patch_db(monkeypatch):
 
 
 @pytest.fixture
-def fas(monkeypatch):
+def fas(monkeypatch, tmp_path):
     _reset()
     monkeypatch.setenv("FAS_KEY", FASKEY)
     _patch_db(monkeypatch)
+    from common import device_info
+    lease = tmp_path / "dnsmasq.leases"
+    lease.write_text("1790946321 aa:bb:cc:dd:ee:01 10.10.0.105 Somchais-iPhone 01:aa:bb:cc:dd:ee:01\n"
+                     "1790946214 aa:bb:cc:dd:ee:02 10.10.0.105 * 01:aa:bb:cc:dd:ee:02\n")
+    monkeypatch.setattr(device_info, "LEASE_FILE", str(lease))
     import importlib
     mod = importlib.reload(importlib.import_module("fas.app"))
     mod.FAS_KEY = FASKEY
@@ -268,12 +275,16 @@ def _nonce(html):
     return m.group(1) if m else ""
 
 
-def _register(fas, natid=NATID, consent=True, mac="AA:BB:CC:DD:EE:01"):
+IPHONE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Mobile/15E148")
+
+
+def _register(fas, natid=NATID, consent=True, mac="AA:BB:CC:DD:EE:01", ua=IPHONE_UA):
     html = fas.get(_gw_url(mac)).get_data(as_text=True)
     data = dict(nonce=_nonce(html), natid=natid)
     if consent:
         data["consent"] = "on"
-    return fas.post("/login", data=data)
+    return fas.post("/login", data=data, headers={"User-Agent": ua})
 
 
 def _approve(admin, rid=1, last4=NATID[-4:], **package):
@@ -572,3 +583,28 @@ def test_real_opennds_gateway_address_passes_validation(fas):
     ctx = decrypt_fas_payload(REAL_FAS_B64, REAL_IV, REAL_FASKEY)
     assert ctx.gatewayaddress == "10.10.0.1:2050"
     assert fas.module._valid_gateway(ctx)
+
+
+# ================================================================ ชื่อเครื่อง + ระบบปฏิบัติการ
+def test_register_records_hostname_and_os(fas):
+    _register(fas)
+    (req,) = DB["access_request"]
+    assert req["hostname"] == "Somchais-iPhone", "ชื่อเครื่องมาจาก lease ของ dnsmasq"
+    assert req["os_label"] == "iPhone · iOS 17.5"
+    assert req["user_agent"] == IPHONE_UA
+
+
+def test_register_without_hostname_or_user_agent_still_works(fas):
+    r = _register(fas, mac="AA:BB:CC:DD:EE:02", ua="")
+    assert r.status_code == 303
+    (req,) = DB["access_request"]
+    assert req["hostname"] is None and req["os_label"] is None and req["user_agent"] is None
+
+
+def test_requests_page_shows_device_and_approval_copies_it_to_session(fas, admin):
+    _register(fas)
+    html = admin.get("/requests").get_data(as_text=True)
+    assert "iPhone · iOS 17.5" in html and "Somchais-iPhone" in html
+    _approve(admin)
+    (s,) = DB["portal_session"]
+    assert s["hostname"] == "Somchais-iPhone" and s["os_label"] == "iPhone · iOS 17.5"

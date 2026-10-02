@@ -29,11 +29,20 @@ def anonymize_customer(execute_fn, customer_id: int) -> int:
     execute_fn(sql, args) -> จำนวนแถวที่ถูกกระทบ (rowcount) -- คืนค่านี้ตรง ๆ ให้ผู้เรียกเช็คว่า
     id ที่ส่งมามีแถวอยู่จริงไหม (0 = ไม่พบแถว)
     """
-    return execute_fn(
+    n = execute_fn(
         "UPDATE customer SET natid_hash = CONCAT('PURGED-', id), "
         "natid_enc = '', natid_masked = 'PURGED' WHERE id = %s",
         (customer_id,),
     )
+    if n:
+        # ชื่อเครื่องอาจมีชื่อจริงของลูกค้า (เช่น "ASUS-Laptop-Somchai") -- ล้างไปพร้อมเลขบัตร
+        # (sql/011_device_info.sql) · os_label ไม่ระบุตัวบุคคล เก็บไว้ได้
+        execute_fn("UPDATE portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
+                   "SET ps.hostname = NULL WHERE v.customer_id = %s", (customer_id,))
+        execute_fn("UPDATE access_request ar JOIN voucher v ON v.id = ar.voucher_id "
+                   "SET ar.hostname = NULL, ar.user_agent = NULL WHERE v.customer_id = %s",
+                   (customer_id,))
+    return n
 
 
 def retention_hold_until(query_one_fn, customer_id: int,

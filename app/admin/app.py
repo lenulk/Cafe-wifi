@@ -591,7 +591,7 @@ def _active_voucher(cur, customer_id: int, lock: bool = False):
 @app.get("/requests")
 @login_required
 def requests_page():
-    rows = query_all("SELECT id, code, mac, natid_hash, natid_masked, created_at, expires_at "
+    rows = query_all("SELECT id, code, mac, hostname, os_label, natid_hash, natid_masked, created_at, expires_at "
                      "FROM access_request WHERE status='pending' AND expires_at > NOW() ORDER BY id")
     pending = []
     with get_conn() as conn, conn.cursor() as cur:
@@ -606,6 +606,7 @@ def requests_page():
                 used = int((cur.fetchone() or {}).get("n", 0))
             # natid_hash ไม่ส่งต่อไปถึง template
             pending.append(dict(id=r["id"], code=r["code"], mac_tail=r["mac"][-5:],
+                                hostname=r["hostname"], os_label=r["os_label"],
                                 natid_masked=r["natid_masked"], created_at=r["created_at"],
                                 expires_at=r["expires_at"], customer=cust, voucher=voucher,
                                 devices_used=used))
@@ -628,8 +629,8 @@ def approve_request(rid: int):
     hours, devices, quota_mb = package
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, code, mac, ip, natid_hash, natid_enc, natid_masked, status, "
-                    "expires_at FROM access_request WHERE id=%s FOR UPDATE", (rid,))
+        cur.execute("SELECT id, code, mac, ip, hostname, os_label, natid_hash, natid_enc, natid_masked, "
+                    "status, expires_at FROM access_request WHERE id=%s FOR UPDATE", (rid,))
         req = cur.fetchone()
         if not req or req["status"] != "pending" or req["expires_at"] <= datetime.now():
             flash("คำขอนี้หมดอายุหรือถูกจัดการไปแล้ว", "err")
@@ -674,7 +675,8 @@ def approve_request(rid: int):
                  session["staff_id"], now, now + timedelta(hours=hours), devices, quota_mb))
             voucher = dict(id=cur.lastrowid, username=code, max_devices=devices)
 
-        error, session_id = access.reserve_pending_session(cur, voucher, req["mac"], req["ip"])
+        error, session_id = access.reserve_pending_session(cur, voucher, req["mac"], req["ip"],
+                                                           req["hostname"], req["os_label"])
         if error:
             conn.rollback()
             flash(f"คำขอ {req['code']}: {error}", "err")
@@ -951,17 +953,26 @@ def search_logs():
         else:
             where.append("(cl.src_ip = %s OR cl.dst_ip = %s)")
         args += [value, value]
-    elif kind == "domain":
+    elif kind in ("domain", "name"):
+        # "name" = คำไม่มีจุด เช่น "DESKTOP-7KQ2L" หรือ "facebook" -- อาจเป็นชื่อเครื่องลูกค้าหรือชื่อเว็บก็ได้
+        # จึงค้นทั้งสองอย่าง ("domain" มีจุด = ชื่อเว็บแน่นอน ไม่ต้องค้นชื่อเครื่อง)
+        conds: list[str] = []
+        if kind == "name":
+            conds.append("ps.hostname LIKE %s"); args.append(f"%{value}%")
         if log_type == "dns":
-            where.append("dl.qname LIKE %s"); args.append(f"%{value}%")
+            conds.append("dl.qname LIKE %s"); args.append(f"%{value}%")
         else:
             # "ใครเข้าเว็บนี้" ในตารางการเชื่อมต่อ: conn_log มีแต่ IP -- ใช้ IP ที่ DNS ตอบสำหรับโดเมนนี้
             # ในช่วงเดียวกัน (ย้อน 1 ชม. เผื่อแคช DNS ของเครื่อง) · เป็นค่าประมาณ: หลายเว็บใช้ IP ร่วมกัน (CDN)
-            where.append("cl.dst_ip IN (SELECT d2.answer FROM dns_log d2 WHERE d2.qname LIKE %s "
+            conds.append("cl.dst_ip IN (SELECT d2.answer FROM dns_log d2 WHERE d2.qname LIKE %s "
                          "AND d2.event_kind = 'answer' AND d2.ts BETWEEN %s AND %s)")
             args += [f"%{value}%", start - timedelta(hours=1), end]
             ctx["note"] = ("ค้นชื่อเว็บในตารางการเชื่อมต่อ = ประมาณจาก IP ที่ DNS ตอบสำหรับเว็บนั้น "
                            "(เว็บที่ใช้ CDN ร่วมกันอาจติดมาด้วย)")
+        if kind == "name":
+            ctx["note"] = ("ค้นทั้งชื่อเครื่องลูกค้าและชื่อเว็บ" +
+                           (" · " + ctx["note"] if ctx["note"] else ""))
+        where.append("(" + " OR ".join(conds) + ")")
     if identified_only:
         where.append("v.id IS NOT NULL")
     if log_type == "dns" and not show_answers:
@@ -969,11 +980,13 @@ def search_logs():
 
     if log_type == "dns":
         sql = ("SELECT dl.ts, dl.client_ip, dl.mac, dl.qname, dl.qtype, dl.answer, dl.event_kind, "
-               "v.username AS voucher_username, c.natid_masked "
+               "v.username AS voucher_username, c.natid_masked, "
+               "ps.hostname AS device_hostname, ps.os_label AS device_os "
                "FROM dns_log dl" + dns_mapping_join() + " WHERE dl.ts BETWEEN %s AND %s")
     else:
         sql = ("SELECT cl.ts, cl.started_at, cl.mac, cl.src_ip, cl.src_port, cl.dst_ip, cl.dst_port, "
-               "cl.proto, cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked "
+               "cl.proto, cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked, "
+               "ps.hostname AS device_hostname, ps.os_label AS device_os "
                "FROM conn_log cl" + conn_mapping_join() + " WHERE cl.ts BETWEEN %s AND %s")
     sql += "".join(f" AND {w}" for w in where) + f" ORDER BY {a}.ts DESC LIMIT %s OFFSET %s"
 
@@ -1033,7 +1046,8 @@ _DOMAIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _classify_log_query(q: str):
-    """เดาว่าพิมพ์อะไรมา -- คืน (kind, value, error) · kind: natid/voucher/mac/ip/domain หรือ None"""
+    """เดาว่าพิมพ์อะไรมา -- คืน (kind, value, error) · kind: natid/voucher/mac/ip/domain/name หรือ None
+    (name = คำไม่มีจุด อาจเป็นชื่อเครื่องหรือชื่อเว็บ)"""
     if not q:
         return None, None, None
     digits = re.sub(r"[\s-]", "", q)
@@ -1051,9 +1065,9 @@ def _classify_log_query(q: str):
     except ValueError:
         pass
     if _DOMAIN_RE.match(q) and any(ch.isalpha() for ch in q):
-        return "domain", q.lower(), None
-    return None, None, ("ไม่รู้จักรูปแบบนี้ — พิมพ์เลขบัตร 13 หลัก, เลขอ้างอิง CAFE-xxxxx, MAC, IP "
-                        "หรือชื่อเว็บ")
+        return ("domain" if "." in q.strip(".") else "name"), q.lower(), None
+    return None, None, ("ไม่รู้จักรูปแบบนี้ — พิมพ์เลขบัตร 13 หลัก, เลขอ้างอิง CAFE-xxxxx, MAC, IP, "
+                        "ชื่อเครื่อง หรือชื่อเว็บ")
 
 
 def _logs_csv(log_type: str, rows):
@@ -1063,17 +1077,19 @@ def _logs_csv(log_type: str, rows):
     w = csv.writer(buf)
     if log_type == "dns":
         w.writerow(["ts", "client_ip", "mac", "qname", "qtype", "answer", "event_kind",
-                    "voucher", "customer_masked"])
+                    "voucher", "customer_masked", "device_hostname", "device_os"])
         for r in rows:
             w.writerow([r["ts"], r["client_ip"], r["mac"], r["qname"], r["qtype"], r["answer"],
-                        r["event_kind"], r["voucher_username"], r["natid_masked"]])
+                        r["event_kind"], r["voucher_username"], r["natid_masked"],
+                        r.get("device_hostname"), r.get("device_os")])
     else:
         w.writerow(["started_at", "ts", "mac", "src_ip", "src_port", "dst_ip", "dst_port", "proto",
-                    "bytes_out", "bytes_in", "voucher", "customer_masked"])
+                    "bytes_out", "bytes_in", "voucher", "customer_masked", "device_hostname", "device_os"])
         for r in rows:
             w.writerow([r["started_at"], r["ts"], r["mac"], r["src_ip"], r["src_port"], r["dst_ip"],
                         r["dst_port"], r["proto"], r["bytes_out"], r["bytes_in"],
-                        r["voucher_username"], r["natid_masked"]])
+                        r["voucher_username"], r["natid_masked"],
+                        r.get("device_hostname"), r.get("device_os")])
     resp = app.make_response("﻿" + buf.getvalue())  # BOM ให้ Excel อ่านภาษาไทยถูก
     resp.headers["Content-Type"] = "text/csv; charset=utf-8"
     resp.headers["Content-Disposition"] = (

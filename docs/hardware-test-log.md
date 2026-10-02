@@ -435,6 +435,18 @@ AES-GCM ล้างสำเนาในคำขอทันทีที่ต
 
 ---
 
+## 3.7 เก็บชื่อเครื่อง + ระบบปฏิบัติการของลูกค้า (2 ต.ค. 2026)
+
+- **แหล่งข้อมูล:** ชื่อเครื่อง = DHCP option 12 ใน `/var/lib/misc/dnsmasq.leases` (ไฟล์ 0644 — `cafe-fas`
+  ซึ่งรันเป็น `cafewifi` + `ProtectSystem=strict` อ่านได้ ไม่ต้องแก้ unit) · OS = User-Agent ตอนกดขอใช้งาน
+- **lease จริงบน Pi** มีทั้ง `Redmi-Note-12-5G`, `ASUS-Laptop-<ชื่อคน>` และ `*` (เครื่องไม่ส่งชื่อ) —
+  ยืนยันว่าชื่อเครื่อง**มีชื่อจริงของคนได้** จึงล้างพร้อมเลขบัตรใน `anonymize_customer()` และแจ้งในนโยบาย
+- **e2e บน Pi** (`tools/lab_e2e_register.sh`, udhcpc ส่ง `hostname:Lab-cte-Phone`, UA Android 14):
+  access_request และ portal_session ได้ `Lab-cte-Phone` / `Android 14 · SM-A546E` ครบ, ออกเน็ตได้ใน 8 วินาที
+- **ค้นหา log ด้วยชื่อเครื่อง:** DNS 8 แถว 221 ms · การเชื่อมต่อ 13 แถว 206 ms (ต้องรอ conntrack DESTROY
+  ~2 นาทีก่อนแถวจะเข้า conn_log) · CSV มีคอลัมน์ `device_hostname,device_os`
+- ข้อจำกัด: ค่าทั้งคู่เครื่องลูกค้าบอกเอง ปลอมได้ — ใช้ประกอบเท่านั้น · session ก่อนฟีเจอร์นี้ไม่มีชื่อเครื่อง
+
 ## 4. ตัวเลขที่วัดได้ (ใช้ในบทที่ 4)
 
 | รายการ | ค่าที่วัดได้ |

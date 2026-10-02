@@ -34,9 +34,10 @@ from common.log_mapping import conn_mapping_join, dns_mapping_join
 log = logging.getLogger("cafe-wifi.export")
 
 CONN_FIELDS = ["ts", "started_at", "mac", "src_ip", "src_port", "dst_ip", "dst_port", "proto",
-               "bytes_out", "bytes_in", "voucher_username", "natid_masked"]
+               "bytes_out", "bytes_in", "voucher_username", "natid_masked",
+               "device_hostname", "device_os"]
 DNS_FIELDS = ["ts", "event_kind", "client_ip", "mac", "qname", "qtype", "answer",
-              "voucher_username", "natid_masked"]
+              "voucher_username", "natid_masked", "device_hostname", "device_os"]
 
 _MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 
@@ -124,7 +125,8 @@ def build_conn_query(start: datetime, end: datetime, mac: str | None = None,
                      ip: str | None = None, customer_id: int | None = None) -> tuple[str, tuple]:
     """กรองช่วงด้วย ts (ตรงกับหน้า /logs และ partition) แล้วโยงตัวบุคคลด้วย JOIN ชุดเดียวกับ /logs"""
     sql = ("SELECT cl.ts, cl.started_at, cl.mac, cl.src_ip, cl.src_port, cl.dst_ip, cl.dst_port, "
-           "cl.proto, cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked "
+           "cl.proto, cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked, "
+           "ps.hostname AS device_hostname, ps.os_label AS device_os "
            "FROM conn_log cl" + conn_mapping_join() + " WHERE cl.ts BETWEEN %s AND %s")
     params: list = [start, end]
     if mac:
@@ -139,7 +141,8 @@ def build_conn_query(start: datetime, end: datetime, mac: str | None = None,
 def build_dns_query(start: datetime, end: datetime, mac: str | None = None,
                     ip: str | None = None, customer_id: int | None = None) -> tuple[str, tuple]:
     sql = ("SELECT dl.ts, dl.event_kind, dl.client_ip, dl.mac, dl.qname, dl.qtype, dl.answer, "
-           "v.username AS voucher_username, c.natid_masked "
+           "v.username AS voucher_username, c.natid_masked, "
+           "ps.hostname AS device_hostname, ps.os_label AS device_os "
            "FROM dns_log dl" + dns_mapping_join() + " WHERE dl.ts BETWEEN %s AND %s")
     params: list = [start, end]
     if mac:

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, abort, redirect, render_template, request
 
-from common import access, audit, crypto
+from common import access, audit, crypto, device_info
 from common.db import execute, get_conn, query_one
 from logger.netutil import resolve_mac
 from .opennds_proto import ClientContext, FasProtocolError, decrypt_fas_payload
@@ -239,11 +239,15 @@ def login():
             return render_template("error.html", title="หน้านี้หมดอายุแล้ว",
                                    message="กรุณาเปิดหน้าเข้าใช้งานใหม่"), 400
         code = access.gen_request_code(cur)
+        # ชื่อเครื่อง/OS ช่วยพนักงานถามลูกค้าว่า "ใช่เครื่องนี้ไหม" -- เครื่องบอกเอง ปลอมได้ ใช้ประกอบเท่านั้น
+        ua = request.headers.get("User-Agent", "")[:device_info.UA_MAX]
         cur.execute(
-            "INSERT INTO access_request (code, mac, ip, natid_hash, natid_enc, natid_masked, "
-            "consent_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,NOW(),"
+            "INSERT INTO access_request (code, mac, ip, hostname, os_label, user_agent, natid_hash, "
+            "natid_enc, natid_masked, consent_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),"
             f"DATE_ADD(NOW(), INTERVAL {access.REQUEST_TTL_MIN} MINUTE))",
-            (code, mac, real_ip, nid_hash, crypto.natid_encrypt(nid), masked))
+            (code, mac, real_ip, device_info.lease_hostname(mac, real_ip),
+             device_info.os_from_user_agent(ua), ua or None,
+             nid_hash, crypto.natid_encrypt(nid), masked))
 
     audit.log(audit.ACCESS_REQUEST, target=code, client_ip=real_ip,
               detail=f"mac={mac} customer={masked}")

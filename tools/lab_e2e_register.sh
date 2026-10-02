@@ -2,7 +2,7 @@
 # lab_e2e_register.sh -- ทดสอบครบวงจรบน Pi จริงด้วยลูกค้าจำลอง (ต้องมี tools/lab_client.sh ที่ /root/cafe-client-test/client.sh)
 # ลูกค้าขอใช้งาน -> อนุมัติผ่าน /requests ตัวจริง -> ndsctl auth -> ออกเน็ต · ใช้: sudo bash lab_e2e_register.sh [4ตัวท้ายที่พนักงานพิมพ์]
 set -u
-NS=cte; MAC=02:ca:fe:00:00:2a; NATID=1101700000010; LAST4=${1:-0010}
+NS=cte; MAC=02:ca:fe:00:00:2a; UA="Mozilla/5.0 (Linux; Android 14; SM-A546E) AppleWebKit/537.36 Chrome/126 Mobile"; NATID=1101700000010; LAST4=${1:-0010}
 cd /root/cafe-client-test
 ./client.sh down $NS >/dev/null 2>&1; ndsctl deauth $MAC >/dev/null 2>&1
 ./client.sh up $NS $MAC
@@ -12,7 +12,7 @@ loc=$($X -o /dev/null -w '%{redirect_url}' http://example.com/)
 echo "1 captive -> ${loc:0:50}"
 nonce=$($X -L "$loc" | grep -o 'name="nonce" value="[^"]*"' | sed 's/.*value="//;s/"//')
 base=$(echo "$loc" | sed 's#\(http://[^/]*\)/.*#\1#')
-echo "2 register POST -> $($X -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "nonce=$nonce" --data-urlencode "natid=$NATID" --data-urlencode consent=on "$base/login")"
+echo "2 register POST -> $($X -o /dev/null -w '%{http_code} %{redirect_url}' --data-urlencode "nonce=$nonce" --data-urlencode "natid=$NATID" --data-urlencode consent=on -A "$UA" "$base/login")"
 code=$($X "$base/request" | grep -oE '>[A-Z0-9]{4}</div>' | head -1 | tr -d '<>/div')
 echo "3 waiting page code=$code"
 
@@ -39,5 +39,6 @@ for i in $(seq 1 30); do
 done
 echo "6 waiting page -> '$st' after $(( $(date +%s)-t0 ))s"
 echo "7 internet -> $($X -o /dev/null -w '%{http_code}' http://example.com/)"
+mysql cafewifi -t -e "SELECT ar.code, ar.hostname, ar.os_label, ps.hostname AS ps_host, ps.os_label AS ps_os FROM access_request ar LEFT JOIN portal_session ps ON ps.id=ar.portal_session_id ORDER BY ar.id DESC LIMIT 1"
 mysql cafewifi -t -e "SELECT ar.code, ar.status, ar.natid_hash IS NULL AS pii_cleared, ar.auth_sent_at IS NOT NULL AS authed, ps.state, v.username, v.max_devices FROM access_request ar LEFT JOIN portal_session ps ON ps.id=ar.portal_session_id LEFT JOIN voucher v ON v.id=ar.voucher_id ORDER BY ar.id DESC LIMIT 1"
 ndsctl json $MAC 2>/dev/null | python3 -c 'import json,sys,datetime as d; c=json.load(sys.stdin); print("openNDS:", c.get("state"), "ends", d.datetime.fromtimestamp(int(c["session_end"])).strftime("%H:%M") if c.get("session_end","null")!="null" else "-")' 2>/dev/null

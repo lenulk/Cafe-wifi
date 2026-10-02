@@ -61,6 +61,9 @@ def test_purge_stale_customers_anonymizes_only_those_without_active_voucher():
         return stale_rows
 
     def fake_exec(sql, args=()):
+        if not sql.strip().upper().startswith("UPDATE CUSTOMER"):
+            assert sql.strip().upper().startswith("UPDATE "), "ล้างชื่อเครื่องต้อง UPDATE ไม่ใช่ DELETE"
+            return 1
         assert sql.strip().upper().startswith("UPDATE CUSTOMER"), \
             "ต้อง UPDATE (anonymize) ไม่ใช่ DELETE -- DELETE จะชน FK ของ voucher"
         anonymized.append(args[0])
@@ -96,6 +99,10 @@ class _FakeCursor:
             self.rowcount = 8
         elif s.startswith("delete from voucher_reveal"):
             self.rowcount = 0
+        elif s.startswith("delete from access_request where created_at < %s"):
+            self.rowcount = 4
+        elif s.startswith(("update portal_session ps join voucher", "update access_request ar join voucher")):
+            self.rowcount = 1
         elif s.startswith("select c.id from customer"):
             self._select_result = self._stale
         elif s.startswith("select greatest("):
@@ -139,6 +146,7 @@ def test_run_end_to_end_with_fake_db(monkeypatch):
     assert summary.customers_deleted == 3
     assert anonymized_customers == [1, 2, 3]
     assert len(audit_calls) == 1
+    assert "access_request=-4" in str(audit_calls[0]), "คำขอใช้งานเก่าต้องถูกลบตามอายุ log"
 
 
 def test_run_refuses_below_legal_minimum(monkeypatch):
