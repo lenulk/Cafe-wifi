@@ -1572,6 +1572,18 @@ config opennds
 	option authidletimeout '30'
 	option checkinterval '60'
 
+	# พอร์ตบนตัว Pi ที่เครื่องลูกค้าเข้าถึงได้ (chain ndsRTR) -- กำหนดเองแล้ว**แทนที่ค่าปริยายทั้งชุด**
+	# จึงต้องใส่ค่าปริยายของ openNDS (udp 53/67, tcp 22/443 -- อ่านจาก nft list บน Pi จริง) กลับไปครบ
+	# + tcp 53 (DNS ขนาดใหญ่) + พอร์ตหน้าแอดมิน: พนักงานได้ IP วงลูกค้า (ร้านจริงมีแค่เราเตอร์ + Pi)
+	# ถ้าไม่ใส่ openNDS จะ reject :${ADMIN_PORT} ทั้งที่ nftables ของเราอนุญาตแล้ว (พบบน Pi 2026-10-02)
+	# gatewayport/fasport openNDS เติมให้เอง · SSH ถูก nftables ของเราบล็อกจากวงลูกค้าอีกชั้นอยู่แล้ว
+	list users_to_router 'allow udp port 53'
+	list users_to_router 'allow tcp port 53'
+	list users_to_router 'allow udp port 67'
+	list users_to_router 'allow tcp port 22'
+	list users_to_router 'allow tcp port 443'
+	list users_to_router 'allow tcp port ${ADMIN_PORT}'
+
 	# walled garden: ต้องเปิดให้ OS ตรวจเจอ captive portal
 	list walledgarden_fqdn_list 'captive.apple.com'
 	list walledgarden_fqdn_list 'connectivitycheck.gstatic.com'

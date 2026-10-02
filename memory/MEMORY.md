@@ -14,3 +14,4 @@
 - [Push only to own GitHub](push-only-to-own-github.md) — never push to anyone else's repo (e.g. Lenilk); only origin lenulk/Cafe-wifi
 - [Two-machine workflow](two-machine-workflow.md) — โน้ตบุ๊ก = ทดลองกับของจริง, เดสก์ท็อป = ทำเอกสารอย่างเดียว; หลักฐานไหลทางเดียวผ่าน git (memory/, docs/, ข้อมูลทดสอบ/) ส่วนไฟล์เล่มต้องหิ้วเอง
 - ["pull" means push](user-says-pull-means-push.md) — "pullเลย" after a push offer = push to origin lenulk; fetch first
+- [Admin reachable from customer LAN](admin-access-from-customer-lan.md) — option B; openNDS users_to_router must include ADMIN_PORT (replaces defaults)
