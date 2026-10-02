@@ -98,6 +98,16 @@ def test_unconfirmed_past_deadline_still_times_out(monkeypatch):
     assert any("auth_timeout" in sql for sql, _ in executed)
 
 
+def test_unreadable_gateway_does_not_time_out_pending(monkeypatch):
+    """ndsctl ล้ม (busy/รีสตาร์ท) ตอน pending เลยกำหนดพอดี -> ห้ามตัดสิทธิ์ ต้องรอรอบถัดไป"""
+    now = datetime.now().replace(microsecond=0)
+    row = _pending_row(now, pending_until=now - timedelta(seconds=1))
+    (promoted, expired), executed, deauthed = _run(monkeypatch, row, None)
+    assert (promoted, expired) == (0, 0)
+    assert deauthed == []
+    assert not any("auth_timeout" in sql for sql, _ in executed)
+
+
 def test_reauth_closes_old_session_and_charges_its_voucher(monkeypatch):
     now = datetime.now().replace(microsecond=0)
     opened = now - timedelta(seconds=2)

@@ -64,6 +64,11 @@ def run() -> tuple[int, int]:
                     "FROM portal_session ps JOIN voucher v ON v.id=ps.voucher_id "
                     "WHERE ps.state='pending' ORDER BY ps.id FOR UPDATE")
         pending = cur.fetchall()
+        # อ่าน ndsctl ไม่ได้ (openNDS กำลังรีสตาร์ท หรือ ndsctl ตอบ busy เพราะ cafe-enforce/คนดูแล
+        # เรียกพร้อมกัน -- เจอจริงบน Pi 2026-10-02 exit 4) = ไม่รู้ว่าใครได้สิทธิ์แล้ว ต้องข้ามทั้งรอบ
+        # เดิมยังตัด pending ที่เลยกำหนดทิ้งเป็น auth_timeout ทั้งที่ลูกค้าอาจออนไลน์แล้วจริง
+        if clients is None:
+            pending = []
         for row in pending:
             # R2-08: ตรวจการยืนยันจาก openNDS ก่อน timeout -- ลูกค้าที่กดตาม redirect ใกล้
             # วินาทีสุดท้ายของ pending ถูกเปิดสิทธิ์ไปแล้ว ต้องไม่ถูกตัดทิ้งว่า auth_timeout
