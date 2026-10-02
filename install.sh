@@ -577,7 +577,8 @@ gen_secrets() {
     local kv key
     for kv in "UPLINK_IP=${UPLINK_CIDR%%/*}" "UPLINK_GW=${UPLINK_GW}" \
               "UPLINK_NETWORK=$(cidr_to_network "$UPLINK_CIDR")" \
-              "GATEWAY_IP=${CLIENT_CIDR%%/*}" "CLIENT_CIDR=${CLIENT_CIDR}"; do
+              "GATEWAY_IP=${CLIENT_CIDR%%/*}" "CLIENT_CIDR=${CLIENT_CIDR}" \
+              "ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login"; do
       key="${kv%%=*}"
       if grep -q "^${key}=" "$secrets"; then
         sed -i "s|^${key}=.*|${kv}|" "$secrets"
@@ -626,6 +627,8 @@ GATEWAY_NAME=${GATEWAY_NAME}
 GATEWAY_IP=${CLIENT_CIDR%%/*}
 CLIENT_CIDR=${CLIENT_CIDR}
 GATEWAY_AUTHDIR=opennds_auth
+# ปุ่ม "สำหรับแอดมิน/พนักงาน" บนหน้า portal -- ชื่อ cafe.wifi ชี้มาที่ Pi ผ่าน dnsmasq และอยู่ใน SAN ของใบรับรอง
+ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login
 
 # N10 (CODING_BRIEF.md) -- bypass_detector.py (T17) ใช้ 3 ค่านี้เฝ้าวง uplink หา IP/MAC
 # แปลกปลอมที่ไม่ใช่ Pi เองหรือเราเตอร์ (ดู D19/§3.1.4) -- ก่อนหน้านี้ UPLINK_CIDR/UPLINK_GW

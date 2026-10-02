@@ -693,3 +693,11 @@ def test_dashboard_and_customers_show_data_usage(fas, admin, tmp_path, monkeypat
     assert "ใช้เน็ตรวม <b" in html and html.count("820.0 MB") >= 2, "ทั้งรายการเครื่องออนไลน์และสิทธิ์ล่าสุด"
     html = admin.get("/customers").get_data(as_text=True)
     assert "820.0 MB" in html
+
+
+def test_portal_has_staff_login_button(fas):
+    """ร้านจริง: พนักงานได้ IP วงลูกค้า -- หน้า portal ต้องมีทางไปหน้าแอดมิน"""
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in html
+    assert 'href="https://cafe.wifi:8443/login"' in html
+    assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in fas.get("/login").get_data(as_text=True), "หน้าแนะนำ cafe.wifi ด้วย"
