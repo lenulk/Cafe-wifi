@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 from datetime import datetime
 
@@ -68,7 +69,51 @@ def purge_orphan_claims() -> int:
     return purged
 
 
+def expire_requests() -> int:
+    """คำขอใช้งานที่ไม่มีใครอนุมัติทันเวลา -> expired และล้างเลขบัตร (hash/ciphertext) ทิ้งทันที"""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE access_request SET status='expired', natid_hash=NULL, natid_enc=NULL "
+                    "WHERE status='pending' AND expires_at <= NOW()")
+        return cur.rowcount
+
+
+def authorize_approved() -> int:
+    """คำขอที่พนักงานอนุมัติแล้ว -> สั่ง openNDS เปิดสิทธิ์ให้ MAC นั้นโดยตรง (`ndsctl auth`)
+
+    แทน redirect ของ FAS เดิม: ลูกค้าไม่ต้องทำอะไรต่อบนหน้าเว็บ (ยืนรอหน้าเคาน์เตอร์ได้เลย) และ
+    ทำได้แค่ที่นี่เพราะ ndsctl ต้องใช้ root (Admin รันเป็น cafewifi) · sessiontimeout = นาทีที่ voucher
+    เหลือ openNDS จึงตัดเองตรงเวลาแม้ cafe-enforce ยังไม่ถึงรอบ · ยืนยัน session ต่อด้วยลูปเดิมใน run()
+    อ่านรายการก่อนแล้วค่อยเรียก ndsctl นอก transaction (ไม่ถือ lock ระหว่างรอ openNDS)
+    """
+    from tools.enforce_voucher_expiry import run_ndsctl
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT ar.id, ar.mac, v.valid_until FROM access_request ar "
+                    "JOIN portal_session ps ON ps.id = ar.portal_session_id "
+                    "JOIN voucher v ON v.id = ar.voucher_id "
+                    "WHERE ar.status='approved' AND ar.auth_sent_at IS NULL AND ps.state='pending'")
+        todo = cur.fetchall()
+    sent = 0
+    for r in todo:
+        minutes = max(1, math.ceil((r["valid_until"] - datetime.now()).total_seconds() / 60))
+        try:
+            res = run_ndsctl(["ndsctl", "auth", r["mac"].lower(), str(minutes)])
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.error("ndsctl auth %s ล้มเหลว: %s", r["mac"], exc)
+            continue
+        if res.returncode != 0:
+            # ยังไม่ทำเครื่องหมาย -> รอบถัดไป (5 วิ) ลองใหม่ จนกว่า pending จะหมดเวลา (auth_timeout)
+            log.error("ndsctl auth %s ไม่สำเร็จ (exit %d): %s", r["mac"], res.returncode,
+                      (res.stdout or b"").decode(errors="replace")[:200])
+            continue
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE access_request SET auth_sent_at=NOW() WHERE id=%s", (r["id"],))
+        sent += 1
+    return sent
+
+
 def run() -> tuple[int, int]:
+    expire_requests()
+    authorize_approved()
     # ถาม openNDS เฉพาะเมื่อมี pending จริง (ส่วนใหญ่ของเวลาไม่มี) -- ไม่ยึด ndsctl ไว้ทุก 5 วิโดยเปล่า
     # ประโยชน์ และอ่านนอก transaction เพื่อไม่ถือ lock ของ portal_session ไว้ระหว่างรอ ndsctl
     with get_conn() as conn, conn.cursor() as cur:

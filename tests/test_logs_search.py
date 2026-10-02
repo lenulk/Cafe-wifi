@@ -94,6 +94,8 @@ class FakeCursor:
         elif "from dns_log dl" in s:
             assert "portal_session" in s
             self._rows = self._search_dns(s, args)
+        elif s.startswith("select count(*) as n from access_request"):
+            self._rows = [{"n": 0}]  # ตัวเลขคำขอที่รออนุมัติบนเมนู
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:120]}")
 

@@ -34,6 +34,11 @@ STAFF_ENABLE = "staff_enable"
 STAFF_ROLE = "staff_role"
 STAFF_RESET_PASSWORD = "staff_reset_password"
 PASSWORD_CHANGE = "password_change"
+# คำขอใช้งานจาก portal (แทนสลิปรหัสผ่าน) -- ใครขอ เครื่องไหน ใครอนุมัติ/ปฏิเสธ
+ACCESS_REQUEST = "access_request"
+REQUEST_APPROVE = "request_approve"
+REQUEST_REJECT = "request_reject"
+REQUEST_MISMATCH = "request_mismatch"  # 4 ตัวท้ายบนบัตรไม่ตรงกับที่ลูกค้ากรอก = อาจอนุมัติผิดคน
 
 
 def log(action: str, staff_id: int | None = None, target: str = "",

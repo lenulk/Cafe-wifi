@@ -1,0 +1,516 @@
+"""
+T-Register — ลูกค้าขอใช้งานบน portal แล้วพนักงานอนุมัติ (แทนสลิปรหัสผ่าน CAFE-XXXXX)
+
+  FAS   : GET /login (payload openNDS) -> ฟอร์ม · POST /login -> access_request + รหัส 4 ตัว · GET /request
+  Admin : GET /requests · POST /requests/<id>/approve (เทียบ 4 ตัวท้ายจากบัตร) · /reject
+  (ส่วน ndsctl auth อยู่ใน test_reconcile_pending.py)
+
+ฐานข้อมูลจำลองในหน่วยความจำชุดเดียวให้ทั้งสองแอป จึงเดินได้ครบวงจร: ลูกค้าขอ -> พนักงานอนุมัติ ->
+portal_session pending -> หน้ารอของลูกค้าเห็นผล · ไม่ต้องมี MariaDB
+"""
+import contextlib
+import copy
+import re
+from datetime import datetime, timedelta
+
+import pytest
+
+from common import crypto
+from fas.opennds_proto import encrypt_fas_payload
+
+FASKEY = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+GW_PARAMS = dict(clientip="10.10.0.105", clientmac="AA:BB:CC:DD:EE:01",
+                 gatewayname="Cafe-Guest", client_hid="hid-0001",
+                 # openNDS จริงส่งพร้อมพอร์ต (ดู test_opennds_proto.py) -- อย่าใช้ IP เปล่า
+                 gatewayaddress="10.10.0.1:2050", authdir="opennds_auth",
+                 originurl="http://example.com/", clientif="eth1")
+NATID = "1101700000010"          # เลขทดสอบ checksum ถูก ไม่ใช่ของคนจริง
+NATID2 = "1101700000028"
+
+DB: dict = {}
+ARP = {"mac": GW_PARAMS["clientmac"]}
+
+
+def _reset():
+    DB.clear()
+    DB.update(fas_context={}, access_request=[], customer=[], voucher=[], portal_session=[],
+              device=[], claims={}, audit=[], staff=[dict(id=1, username="admin", role="admin",
+                                                          is_active=1, must_change_password=0,
+                                                          password_changed_at=None)])
+    ARP["mac"] = GW_PARAMS["clientmac"]
+
+
+def _now():
+    return datetime.now()
+
+
+def _live_pending(r):
+    return r["status"] == "pending" and r["expires_at"] > _now()
+
+
+class FakeCursor:
+    def __init__(self):
+        self.lastrowid = None
+        self.rowcount = 0
+        self._rows = []
+
+    def execute(self, sql, args=()):  # noqa: C901 -- ตัวจำลอง SQL ตรง ๆ อ่านง่ายกว่าแยกฟังก์ชัน
+        s = " ".join(sql.split()).lower()
+        self._rows, self.rowcount = [], 0
+        ar, cust, vou, ps = DB["access_request"], DB["customer"], DB["voucher"], DB["portal_session"]
+        # ---- FAS context
+        if s.startswith("insert into fas_context"):
+            key, payload, ip, expiry = args
+            DB["fas_context"][key] = dict(payload=payload, request_ip=ip, expires_at=expiry,
+                                          consumed_at=None)
+        elif s.startswith("select payload, request_ip"):
+            row = DB["fas_context"].get(args[0])
+            self._rows = [row] if row else []
+        elif s.startswith("update fas_context set consumed_at=now()"):
+            row = DB["fas_context"].get(args[0])
+            self.rowcount = int(bool(row and not row["consumed_at"]))
+            if self.rowcount:
+                row["consumed_at"] = _now()
+        # ---- access_request
+        elif s.startswith("select id from access_request where mac=%s and status='pending'"):
+            self._rows = [r for r in ar if r["mac"] == args[0] and _live_pending(r)]
+        elif s.startswith("select count(*) as n from access_request where status='pending'"):
+            self._rows = [{"n": sum(_live_pending(r) for r in ar)}]
+        elif s.startswith("select id from access_request where code=%s"):
+            self._rows = [r for r in ar if r["code"] == args[0] and _live_pending(r)]
+        elif s.startswith("insert into access_request"):
+            code, mac, ip, h, enc, masked = args
+            ar.append(dict(id=len(ar) + 1, code=code, mac=mac, ip=ip, natid_hash=h, natid_enc=enc,
+                           natid_masked=masked, consent_at=_now(), status="pending",
+                           created_at=_now(), expires_at=_now() + timedelta(minutes=15),
+                           decided_at=None, decided_by=None, decision_note=None, voucher_id=None,
+                           portal_session_id=None, auth_sent_at=None))
+            self.lastrowid = len(ar)
+        elif s.startswith("select ar.code, ar.status, ar.expires_at"):
+            mine = [r for r in ar if r["mac"] == args[0]]
+            if mine:
+                r = mine[-1]
+                sess = next((x for x in ps if x["id"] == r["portal_session_id"]), None)
+                v = next((x for x in vou if x["id"] == r["voucher_id"]), None)
+                self._rows = [dict(r, session_state=sess and sess["state"],
+                                   valid_until=v and v["valid_until"])]
+        elif s.startswith("select id, code, mac, natid_hash, natid_masked, created_at"):
+            self._rows = [r for r in ar if _live_pending(r)]
+        elif s.startswith("select ar.code, ar.natid_masked, ar.status"):
+            self._rows = [dict(r, decided_by="admin") for r in ar
+                          if r["status"] in ("approved", "rejected")]
+        elif s.startswith("select id, code, mac, ip, natid_hash, natid_enc"):
+            self._rows = [r for r in ar if r["id"] == args[0]]
+        elif s.startswith("select code, natid_masked from access_request"):
+            self._rows = [r for r in ar if r["id"] == args[0] and r["status"] == "pending"]
+        elif s.startswith("update access_request set status='approved'"):
+            staff, vid, sid, rid = args
+            ar[rid - 1].update(status="approved", decided_at=_now(), decided_by=staff, voucher_id=vid,
+                               portal_session_id=sid, natid_hash=None, natid_enc=None)
+        elif s.startswith("update access_request set status='rejected'"):
+            staff, note, rid = args
+            ar[rid - 1].update(status="rejected", decided_at=_now(), decided_by=staff,
+                               decision_note=note, natid_hash=None, natid_enc=None)
+        # ---- customer
+        elif s.startswith("select is_blocked from customer where natid_hash"):
+            self._rows = [c for c in cust if c["natid_hash"] == args[0]]
+        elif s.startswith("select id, is_blocked"):
+            self._rows = [c for c in cust if c["natid_hash"] == args[0]]
+        elif s.startswith("update customer set last_seen"):
+            c = next(c for c in cust if c["id"] == args[0])
+            c["visit_count"] += 1
+        elif s.startswith("insert into customer"):
+            cust.append(dict(id=len(cust) + 1, natid_hash=args[0], natid_enc=args[1],
+                             natid_masked=args[2], is_blocked=0, visit_count=1))
+            self.lastrowid = len(cust)
+        # ---- voucher
+        elif s.startswith("select id, username, max_devices, valid_until"):
+            self._rows = sorted([v for v in vou if v["customer_id"] == args[0]
+                                 and v["status"] == "active" and v["valid_until"] > _now()],
+                                key=lambda v: v["valid_until"], reverse=True)[:1]
+        elif s.startswith("insert into voucher"):
+            cid, code, ph, staff, vf, vu, dev, quota = args
+            vou.append(dict(id=len(vou) + 1, customer_id=cid, username=code, password_hash=ph,
+                            issued_by=staff, valid_from=vf, valid_until=vu, max_devices=dev,
+                            quota_mb=quota, used_mb=0, status="active"))
+            self.lastrowid = len(vou)
+        elif s.startswith("select count(*) as n from device where voucher_id"):
+            self._rows = [{"n": sum(d["voucher_id"] == args[0] for d in DB["device"])}]
+        # ---- common/access.reserve_pending_session
+        elif s.startswith("select id from voucher where id=%s for update"):
+            self._rows = [{"id": args[0]}]
+        elif s.startswith("select id from portal_session where mac=%s and state='pending'"):
+            self._rows = [x for x in ps if x["mac"] == args[0] and x["state"] == "pending"]
+        elif s.startswith("insert ignore into pending_mac_claim"):
+            self.rowcount = int(args[0] not in DB["claims"])
+            if self.rowcount:
+                DB["claims"][args[0]] = None
+        elif s.startswith("update pending_mac_claim set portal_session_id"):
+            DB["claims"][args[1]] = args[0]
+        elif s.startswith("select count(*) as n from ("):
+            vid = args[0]
+            macs = {d["mac"] for d in DB["device"] if d["voucher_id"] == vid}
+            macs |= {x["mac"] for x in ps if x["voucher_id"] == vid and x["state"] == "pending"}
+            self._rows = [{"n": len(macs)}]
+        elif s.startswith("select 1 from device"):
+            vid, mac = args[0], args[1]
+            hit = any(d["voucher_id"] == vid and d["mac"] == mac for d in DB["device"])
+            hit |= any(x["voucher_id"] == vid and x["mac"] == mac and x["state"] == "pending" for x in ps)
+            self._rows = [{"1": 1}] if hit else []
+        elif s.startswith("insert into portal_session"):
+            vid, mac, ip = args
+            ps.append(dict(id=len(ps) + 1, voucher_id=vid, mac=mac, ip=ip, state="pending",
+                           started_at=_now()))
+            self.lastrowid = len(ps)
+        # ---- staff / audit
+        elif s.startswith("select role, is_active"):
+            self._rows = [x for x in DB["staff"] if x["id"] == args[0]]
+        elif s.startswith("insert into audit_log"):
+            DB["audit"].append(args)
+        elif s.startswith("select count(*) as n from staff"):
+            self._rows = [{"n": len(DB["staff"])}]
+        # ---- dashboard
+        elif s.startswith("select (select count(*) from voucher"):
+            self._rows = [dict(active_vouchers=0, customers=len(cust), issued_today=0, online_now=0)]
+        elif s.startswith("select v.id, v.username, v.issued_at"):
+            self._rows = []
+        else:
+            raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:90]}")
+        if self._rows and not self.rowcount:
+            self.rowcount = len(self._rows)
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeConn:
+    """snapshot ตอนเปิด connection -- rollback() ย้อนได้จริง (R2-01: ทุกทางที่ปฏิเสธต้องไม่เหลือ claim ค้าง)"""
+
+    def __init__(self):
+        self._snap = copy.deepcopy(DB)
+
+    def cursor(self):
+        return FakeCursor()
+
+    def rollback(self):
+        snap = copy.deepcopy(self._snap)
+        DB.clear()
+        DB.update(snap)
+
+
+def _patch_db(monkeypatch):
+    import common.db as db
+    monkeypatch.setattr(db, "get_conn", lambda: contextlib.nullcontext(FakeConn()))
+
+    def _run(sql, args=()):
+        cur = FakeCursor()
+        cur.execute(sql, args)
+        return cur
+
+    monkeypatch.setattr(db, "query_one", lambda s, a=(): _run(s, a).fetchone())
+    monkeypatch.setattr(db, "query_all", lambda s, a=(): _run(s, a).fetchall())
+    monkeypatch.setattr(db, "execute", lambda s, a=(): _run(s, a).rowcount)
+
+
+@pytest.fixture
+def fas(monkeypatch):
+    _reset()
+    monkeypatch.setenv("FAS_KEY", FASKEY)
+    _patch_db(monkeypatch)
+    import importlib
+    mod = importlib.reload(importlib.import_module("fas.app"))
+    mod.FAS_KEY = FASKEY
+    mod.client_ip = lambda: GW_PARAMS["clientip"]
+    mod.resolve_mac = lambda ip: ARP["mac"] if ip == GW_PARAMS["clientip"] else None
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: None)  # ping กระตุ้น ARP
+    mod.app.config.update(TESTING=True)
+    mod._attempts.clear()
+    c = mod.app.test_client()
+    c.module = mod
+    return c
+
+
+@pytest.fixture
+def admin(monkeypatch, tmp_path, fas):
+    """Admin ใช้ DB จำลองชุดเดียวกับ FAS (ต้องสร้าง fas ก่อน -- fixture นี้พึ่ง fas)"""
+    import importlib
+    mod = importlib.reload(importlib.import_module("admin.app"))
+    mod.SETUP_TOKEN_FILE = tmp_path / "setup.token"
+    mod.app.config.update(TESTING=True, SESSION_COOKIE_SECURE=False, CSRF_ENABLED=False)
+    c = mod.app.test_client()
+    with c.session_transaction() as s:
+        s.update(staff_id=1, username="admin", role="admin", pw_at="")
+    return c
+
+
+def _gw_url(mac="AA:BB:CC:DD:EE:01"):
+    from urllib.parse import quote
+    ARP["mac"] = mac
+    fas_b64, iv = encrypt_fas_payload(dict(GW_PARAMS, clientmac=mac), FASKEY)
+    return f"/login?fas={quote(fas_b64, safe='')}&iv={quote(iv, safe='')}"
+
+
+def _nonce(html):
+    m = re.search(r'name="nonce" value="([^"]*)"', html)
+    return m.group(1) if m else ""
+
+
+def _register(fas, natid=NATID, consent=True, mac="AA:BB:CC:DD:EE:01"):
+    html = fas.get(_gw_url(mac)).get_data(as_text=True)
+    data = dict(nonce=_nonce(html), natid=natid)
+    if consent:
+        data["consent"] = "on"
+    return fas.post("/login", data=data)
+
+
+def _approve(admin, rid=1, last4=NATID[-4:], **package):
+    return admin.post(f"/requests/{rid}/approve", data=dict(last4=last4, **package))
+
+
+# ================================================================ FAS: ฟอร์ม + ส่งคำขอ
+def test_manual_page_without_fas_params(fas):
+    r = fas.get("/login")
+    assert r.status_code == 200 and "cafe.wifi" in r.get_data(as_text=True)
+
+
+def test_gateway_payload_shows_registration_form(fas):
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    assert _nonce(html)
+    assert 'name="natid"' in html and 'type="password"' in html, "ช่องเลขบัตรต้องซ่อนตัวเลข"
+    assert 'name="consent"' in html
+    assert 'name="password"' not in html, "เลิกใช้รหัสผ่านแล้ว"
+
+
+def test_wrong_faskey_or_missing_key(fas, monkeypatch):
+    bad_b64, iv = encrypt_fas_payload(GW_PARAMS, "b" * 32)
+    assert fas.get(f"/login?fas={bad_b64}&iv={iv}").status_code == 400
+    monkeypatch.setattr(fas.module, "FAS_KEY", "")
+    assert fas.get(_gw_url()).status_code == 503
+
+
+def test_register_creates_request_and_redirects_to_waiting_page(fas):
+    r = _register(fas)
+    assert r.status_code == 303 and r.headers["Location"].endswith("/request")
+    (req,) = DB["access_request"]
+    assert req["status"] == "pending" and req["mac"] == "AA:BB:CC:DD:EE:01"
+    assert re.fullmatch(r"[A-Z0-9]{4}", req["code"])
+    assert req["natid_masked"] == crypto.mask_natid(NATID)
+    assert NATID not in repr(req), "ห้ามเก็บเลขบัตรแบบอ่านออก"
+    assert crypto.natid_decrypt(req["natid_enc"]) == NATID
+    page = fas.get("/request").get_data(as_text=True)
+    assert req["code"] in page and 'http-equiv="refresh"' in page
+
+
+def test_natid_never_appears_in_audit_or_responses(fas):
+    r = _register(fas)
+    assert NATID not in r.get_data(as_text=True)
+    assert NATID not in fas.get("/request").get_data(as_text=True)
+    assert all(NATID not in str(a) for a in DB["audit"])
+
+
+def test_invalid_natid_and_missing_consent_rejected(fas):
+    assert _register(fas, natid="1234567890123").status_code == 400
+    assert _register(fas, consent=False).status_code == 400
+    assert DB["access_request"] == []
+
+
+def test_resubmit_reuses_pending_request(fas):
+    _register(fas)
+    r = _register(fas)
+    assert r.status_code == 303
+    assert len(DB["access_request"]) == 1
+
+
+def test_blocked_customer_cannot_request(fas):
+    DB["customer"].append(dict(id=1, natid_hash=crypto.natid_hash(NATID), natid_enc=b"",
+                               natid_masked="x", is_blocked=1, visit_count=3))
+    r = _register(fas)
+    assert r.status_code == 403 and "ติดต่อพนักงาน" in r.get_data(as_text=True)
+    assert DB["access_request"] == []
+
+
+def test_rate_limit_on_bad_natid(fas):
+    codes = [_register(fas, natid="1234567890123").status_code for _ in range(7)]
+    assert codes[-1] == 429
+
+
+def test_queue_cap(fas, monkeypatch):
+    monkeypatch.setattr(fas.module.access, "MAX_PENDING_REQUESTS", 1)
+    assert _register(fas, mac="AA:BB:CC:DD:EE:01").status_code == 303
+    assert _register(fas, natid=NATID2, mac="AA:BB:CC:DD:EE:02").status_code == 503
+
+
+def test_nonce_is_single_use(fas):
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    data = dict(nonce=_nonce(html), natid=NATID, consent="on")
+    assert fas.post("/login", data=data).status_code == 303
+    DB["access_request"][0]["status"] = "rejected"  # ไม่ให้เข้าทาง "ใช้คำขอเดิม"
+    assert fas.post("/login", data=data).status_code == 400
+
+
+def test_arp_mismatch_or_missing_rejected(fas, monkeypatch):
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    ARP["mac"] = "AA:BB:CC:DD:EE:99"
+    r = fas.post("/login", data=dict(nonce=_nonce(html), natid=NATID, consent="on"))
+    assert r.status_code == 400
+    monkeypatch.setattr(fas.module, "resolve_mac", lambda ip: None)
+    r = fas.post("/login", data=dict(nonce=_nonce(html), natid=NATID, consent="on"))
+    assert r.status_code == 400
+    assert DB["access_request"] == []
+
+
+def test_waiting_page_without_request(fas):
+    assert "ไม่พบคำขอ" in fas.get("/request").get_data(as_text=True)
+
+
+# ================================================================ Admin: อนุมัติ/ปฏิเสธ
+def test_requests_page_lists_pending_without_full_natid(fas, admin):
+    _register(fas)
+    html = admin.get("/requests").get_data(as_text=True)
+    code = DB["access_request"][0]["code"]
+    assert code in html and crypto.mask_natid(NATID) in html
+    assert NATID not in html, "พนักงานต้องไม่เห็นเลขบัตรเต็ม (§6.2)"
+    assert "ลูกค้าใหม่" in html
+    assert f'<b class="badge err">1</b>' in admin.get("/").get_data(as_text=True)
+
+
+def test_approve_new_customer_creates_voucher_and_pending_session(fas, admin):
+    _register(fas)
+    r = _approve(admin, hours="2", devices="1", quota_mb="500")
+    assert r.status_code == 302
+    req = DB["access_request"][0]
+    assert req["status"] == "approved" and req["natid_enc"] is None and req["natid_hash"] is None
+    (c,) = DB["customer"]
+    assert crypto.natid_decrypt(c["natid_enc"]) == NATID
+    (v,) = DB["voucher"]
+    assert (v["max_devices"], v["quota_mb"]) == (1, 500)
+    assert timedelta(hours=1, minutes=59) < v["valid_until"] - datetime.now() <= timedelta(hours=2)
+    (s,) = DB["portal_session"]
+    assert (s["mac"], s["state"], s["voucher_id"]) == ("AA:BB:CC:DD:EE:01", "pending", v["id"])
+    assert req["portal_session_id"] == s["id"] and req["voucher_id"] == v["id"]
+    assert "request_approve" in [a[1] for a in DB["audit"]]
+    # ฝั่งลูกค้า: หน้ารอเปลี่ยนเป็น "กำลังเปิด" แล้วเป็น "ใช้ได้แล้ว" เมื่อ reconcile ยืนยัน
+    assert "กำลังเปิดอินเทอร์เน็ต" in fas.get("/request").get_data(as_text=True)
+    s["state"] = "authenticated"
+    assert "ใช้อินเทอร์เน็ตได้แล้ว" in fas.get("/request").get_data(as_text=True)
+
+
+def test_last4_mismatch_blocks_approval_and_is_audited(fas, admin):
+    _register(fas)
+    r = _approve(admin, last4="9999")
+    assert r.status_code == 302
+    assert DB["access_request"][0]["status"] == "pending"
+    assert DB["voucher"] == [] and DB["portal_session"] == [] and DB["claims"] == {}
+    assert "request_mismatch" in [a[1] for a in DB["audit"]]
+
+
+def test_second_device_joins_existing_voucher(fas, admin):
+    _register(fas, mac="AA:BB:CC:DD:EE:01")
+    _approve(admin, rid=1, devices="2")
+    DB["portal_session"][0]["state"] = "authenticated"
+    DB["device"].append(dict(voucher_id=1, mac="AA:BB:CC:DD:EE:01"))
+    DB["claims"].clear()
+    _register(fas, mac="AA:BB:CC:DD:EE:02")
+    assert "มีสิทธิ์อยู่แล้ว" in admin.get("/requests").get_data(as_text=True)
+    _approve(admin, rid=2, hours="24")  # แพ็กเกจใหม่ถูกเพิกเฉย ใช้ของเดิม
+    assert len(DB["voucher"]) == 1
+    assert DB["portal_session"][1]["voucher_id"] == 1
+    assert DB["customer"][0]["visit_count"] == 2
+
+
+def test_device_limit_on_existing_voucher(fas, admin):
+    _register(fas, mac="AA:BB:CC:DD:EE:01")
+    _approve(admin, rid=1, devices="1")
+    DB["portal_session"][0]["state"] = "authenticated"
+    DB["device"].append(dict(voucher_id=1, mac="AA:BB:CC:DD:EE:01"))
+    DB["claims"].clear()
+    _register(fas, mac="AA:BB:CC:DD:EE:02")
+    r = _approve(admin, rid=2)
+    assert r.status_code == 302
+    assert DB["access_request"][1]["status"] == "pending", "ครบจำนวนเครื่อง = ไม่อนุมัติ"
+    assert len(DB["portal_session"]) == 1 and "AA:BB:CC:DD:EE:02" not in DB["claims"]
+
+
+def test_blocked_customer_cannot_be_approved(fas, admin):
+    _register(fas)
+    DB["customer"].append(dict(id=1, natid_hash=crypto.natid_hash(NATID), natid_enc=b"",
+                               natid_masked="x", is_blocked=1, visit_count=1))
+    assert "ลูกค้าถูกระงับ" in admin.get("/requests").get_data(as_text=True)
+    _approve(admin)
+    assert DB["access_request"][0]["status"] == "pending" and DB["voucher"] == []
+
+
+def test_expired_request_cannot_be_approved(fas, admin):
+    _register(fas)
+    DB["access_request"][0]["expires_at"] = datetime.now() - timedelta(seconds=1)
+    _approve(admin)
+    assert DB["voucher"] == []
+    assert "หมดอายุ" in fas.get("/request").get_data(as_text=True)
+
+
+def test_reject_clears_pii_and_shows_reason_to_customer(fas, admin):
+    _register(fas)
+    r = admin.post("/requests/1/reject", data=dict(reason="ไม่มีบัตรมาแสดง"))
+    assert r.status_code == 302
+    req = DB["access_request"][0]
+    assert req["status"] == "rejected" and req["natid_enc"] is None
+    assert "ไม่มีบัตรมาแสดง" in fas.get("/request").get_data(as_text=True)
+    assert "request_reject" in [a[1] for a in DB["audit"]]
+    assert admin.post("/requests/1/reject").status_code == 302  # ซ้ำ = ไม่พัง
+
+
+def test_bad_package_values_rejected(fas, admin):
+    _register(fas)
+    _approve(admin, hours="abc")
+    _approve(admin, quota_mb="-5")
+    assert DB["voucher"] == [] and DB["access_request"][0]["status"] == "pending"
+
+
+def test_staff_role_can_approve(fas, admin):
+    DB["staff"].append(dict(id=2, username="barista", role="staff", is_active=1,
+                            must_change_password=0, password_changed_at=None))
+    with admin.session_transaction() as s:
+        s.update(staff_id=2, username="barista", role="staff", pw_at="")
+    _register(fas)
+    _approve(admin)
+    assert DB["access_request"][0]["status"] == "approved"
+
+
+def test_csrf_required_on_approve(fas, admin):
+    admin.application.config.update(CSRF_ENABLED=True)
+    _register(fas)
+    assert _approve(admin).status_code == 400
+    assert DB["access_request"][0]["status"] == "pending"
+
+
+def test_old_issue_page_is_gone(admin):
+    assert admin.get("/issue").status_code == 404
+
+
+# ================================================================ gateway validation (เดิมใน test_fas_flow)
+@pytest.mark.parametrize("address,ok", [
+    ("10.10.0.1:2050", True), ("10.10.0.1", True), ("10.10.0.1:8080", False),
+    ("10.10.0.99:2050", False), ("evil.example:2050", False),
+])
+def test_valid_gateway_accepts_ip_with_nds_port(fas, address, ok):
+    from fas.opennds_proto import ClientContext
+    ctx = ClientContext(clientmac="AA:BB:CC:DD:EE:01", hid="h", gatewayaddress=address,
+                        authdir="opennds_auth")
+    assert fas.module._valid_gateway(ctx) is ok
+
+
+def test_real_opennds_gateway_address_passes_validation(fas):
+    from fas.opennds_proto import decrypt_fas_payload
+    from test_opennds_proto import REAL_FAS_B64, REAL_FASKEY, REAL_IV
+    ctx = decrypt_fas_payload(REAL_FAS_B64, REAL_IV, REAL_FASKEY)
+    assert ctx.gatewayaddress == "10.10.0.1:2050"
+    assert fas.module._valid_gateway(ctx)

@@ -114,6 +114,8 @@ class FakeCursor:
         elif s.startswith("insert into audit_log"):
             AUDIT.append(args)
             self.rowcount = 1
+        elif s.startswith("select count(*) as n from access_request"):
+            self._rows = [{"n": 0}]  # ตัวเลขคำขอที่รออนุมัติบนเมนู
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:80]}")
 

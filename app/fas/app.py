@@ -4,13 +4,14 @@ fas/app.py — Captive Portal (Forwarding Authentication Service, FAS level 2)
 ลำดับการทำงาน (ดู §3.3 ใน PROJECT_PLAN.md):
   1. ลูกค้าต่อ Wi-Fi -> openNDS redirect มาที่ GET /login?fas=..&iv=..
   2. ถอดรหัส payload ได้ ClientContext (mac, hid, gatewayaddress, originurl, ...)
-  3. แสดงฟอร์มให้กรอก username/password ของ voucher (ฝัง context ไว้ใน hidden field
-     เพราะ cookie อาจใช้งานไม่ได้เสถียรระหว่างขั้นตอน captive portal)
-  4. POST /login -> ตรวจ voucher, ผูก MAC, จำกัดจำนวนอุปกรณ์, เปิด portal_session
-  5. redirect (302) ไปยัง authaction URL ของ openNDS จริง ๆ (browser ของลูกค้าเป็นคนยิง ไม่ใช่ server)
-     -> openNDS อนุญาต MAC ผ่าน nftables
+  3. แสดงฟอร์มขอใช้งาน: เลขบัตรประชาชน + ยินยอมตามนโยบายความเป็นส่วนตัว (context เก็บฝั่ง server
+     ผูกกับ nonce ใน fas_context)
+  4. POST /login -> ยืนยัน MAC จาก ARP, สร้าง access_request พร้อมรหัสคำขอ 4 ตัว
+  5. GET /request -> หน้ารอ: ลูกค้าโชว์รหัสให้พนักงาน พนักงานตรวจบัตรแล้วอนุมัติใน Admin
+  6. tools/reconcile_pending.py (root) สั่ง `ndsctl auth <mac>` เปิดสิทธิ์ให้เครื่องนี้โดยตรง
+     แล้วยืนยัน session กับ openNDS -- ลูกค้าไม่ต้องพิมพ์ username/password ใด ๆ
 
-ความซื่อสัตย์ทางวิศวกรรม: ยังไม่เคยทดสอบกับ openNDS binary จริง (ดูหมายเหตุใน opennds_proto.py)
+(2026-10-02 เลิกใช้สลิป CAFE-XXXXX + รหัสผ่าน -- ดู sql/010_access_request.sql)
 """
 from __future__ import annotations
 
@@ -22,16 +23,14 @@ import re
 import secrets
 import subprocess
 import time
-from dataclasses import replace
 from datetime import datetime, timedelta
 
 from flask import Flask, abort, redirect, render_template, request
 
-from common import audit, crypto
+from common import access, audit, crypto
 from common.db import execute, get_conn, query_one
 from logger.netutil import resolve_mac
-from .opennds_proto import (ClientContext, FasProtocolError,
-                            build_auth_action_url, decrypt_fas_payload)
+from .opennds_proto import ClientContext, FasProtocolError, decrypt_fas_payload
 
 app = Flask(__name__)
 app.config.update(
@@ -169,9 +168,9 @@ def login():
             return render_template("error.html", title="ข้อมูลเครือข่ายไม่ตรงกัน",
                                    message="กรุณาต่อ Wi-Fi ใหม่อีกครั้ง"), 400
         nonce = _save_context(ctx, real_ip)
-        return render_template("login.html", nonce=nonce)
+        return render_template("register.html", nonce=nonce)
 
-    # ---- POST ----
+    # ---- POST: ส่งคำขอใช้งาน ----
     nonce = request.form.get("nonce", "")
     real_ip = client_ip()
     ctx = _load_context(nonce, real_ip)
@@ -186,132 +185,113 @@ def login():
         return render_template("error.html", title="ข้อมูลเครือข่ายไม่ตรงกัน",
                                message="กรุณาต่อ Wi-Fi ใหม่อีกครั้ง"), 400
 
-    # R2-L01: ต้องยืนยัน MAC จาก ARP ของ real_ip ก่อนผูกกับ session; ถ้า cache ว่าง
-    # ให้กระตุ้น ARP หนึ่งครั้งแล้วอ่านใหม่ แม้ ping ไม่ได้รับ ICMP reply ก็อาจได้ ARP reply
-    arp_mac = resolve_mac(real_ip)
-    if not arp_mac:
-        try:
-            subprocess.run(["ping", "-4", "-n", "-c", "1", "-W", "1", real_ip],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=2, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            app.logger.warning("กระตุ้น ARP ไม่สำเร็จ: ip=%s error=%s", real_ip, exc)
-        arp_mac = resolve_mac(real_ip)
+    arp_mac = _verified_mac(real_ip)
     if not arp_mac:
         app.logger.warning("ไม่พบ MAC ใน ARP หลังลองอีกครั้ง: ip=%s", real_ip)
         return render_template("error.html", title="ยืนยันอุปกรณ์ไม่สำเร็จ",
                                message="ไม่พบอุปกรณ์บนเครือข่าย กรุณาเปิดหน้าเข้าใช้งานแล้วลองอีกครั้ง"), 400
-    if normalize_mac(arp_mac) != normalize_mac(ctx.clientmac):
+    if arp_mac != normalize_mac(ctx.clientmac):
         app.logger.warning("MAC ไม่ตรงกับ ARP: form=%s arp=%s ip=%s", ctx.clientmac, arp_mac, real_ip)
         return render_template("error.html", title="ข้อมูลอุปกรณ์ไม่ตรงกัน",
                                message="กรุณาต่อ Wi-Fi ใหม่อีกครั้ง"), 400
-    ctx = replace(ctx, clientmac=normalize_mac(arp_mac))
+    mac = arp_mac
 
-    bucket = f"login:{ctx.clientmac}"
+    bucket = f"register:{mac}"
     if rate_limited(bucket):
-        return render_template("login.html", nonce=nonce,
-                               error="พยายามเข้าสู่ระบบมากเกินไป กรุณารอ 10 นาทีแล้วลองใหม่"), 429
+        return render_template("register.html", nonce=nonce,
+                               error="ลองหลายครั้งเกินไป กรุณารอ 10 นาที หรือแจ้งพนักงาน"), 429
 
-    code = (request.form.get("username") or "").strip().upper()
-    password = request.form.get("password") or ""
-
-    voucher = query_one("""
-        SELECT v.id, v.password_hash, v.valid_from, v.valid_until, v.status,
-               v.max_devices, v.customer_id, c.is_blocked
-        FROM voucher v JOIN customer c ON c.id = v.customer_id
-        WHERE v.username = %s
-    """, (code,))
-
-    now = datetime.now()
-    reason = None
-    if not voucher:
-        reason = "ไม่พบรหัสนี้ในระบบ"
-    elif voucher["is_blocked"]:
-        reason = "ลูกค้ารายนี้ถูกระงับการใช้งาน กรุณาติดต่อพนักงาน"
-    elif voucher["status"] != "active":
-        reason = "รหัสนี้ถูกยกเลิกหรือใช้งานไปแล้ว"
-    elif now > voucher["valid_until"]:
-        reason = "รหัสนี้หมดอายุแล้ว กรุณาขอรหัสใหม่จากพนักงาน"
-    elif now < voucher["valid_from"]:
-        reason = "รหัสนี้ยังไม่ถึงเวลาที่ใช้งานได้"
-    elif not crypto.verify_password(voucher["password_hash"], password):
-        reason = "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
-
-    if reason:
+    if request.form.get("consent") != "on":
+        return render_template("register.html", nonce=nonce,
+                               error="ต้องอ่านและยอมรับนโยบายความเป็นส่วนตัวก่อนขอใช้งาน"), 400
+    # เลขบัตรเต็มเดินทางมาบน HTTP (ความเสี่ยงที่เจ้าของโครงงานยอมรับ -- sql/010) ฝั่งนี้จึงห้ามมีร่องรอย
+    # เลขเต็มที่ไหนอีก: ไม่ลง log/audit ไม่ส่งกลับไปในหน้า error ไม่เก็บแบบอ่านออก
+    nid = crypto.normalize_natid(request.form.get("natid", ""))
+    if not crypto.valid_thai_id(nid):
         record_attempt(bucket)
-        audit.log(audit.LOGIN_FAIL, target=code, client_ip=real_ip,
-                  detail=f"mac={ctx.clientmac} reason={reason}")
-        return render_template("login.html", nonce=nonce, error=reason), 401
+        return render_template("register.html", nonce=nonce,
+                               error="เลขบัตรประชาชนไม่ถูกต้อง กรุณาตรวจอีกครั้ง"), 400
+    nid_hash = crypto.natid_hash(nid)
+    masked = crypto.mask_natid(nid)
 
-    try:
-        redirect_url = build_auth_action_url(ctx, FAS_KEY)
-    except FasProtocolError as exc:
-        app.logger.error("สร้าง auth URL ไม่สำเร็จ: %s", exc)
-        return render_template("error.html", title="เกิดข้อผิดพลาด",
-                               message="กรุณาลองใหม่อีกครั้ง หรือแจ้งพนักงาน"), 500
-
-    # จองโควตาและสร้าง pending ภายใต้ transaction เดียวกัน; ผูก device หลัง gateway ยืนยัน
-    # แก้บั๊ก R2-01 (รีวิวรอบ 2): get_conn() commit เมื่อออกจาก block แบบปกติ -- การ return กลาง block
-    # จึงเคย commit แถว pending_mac_claim ที่ portal_session_id=NULL ทิ้งไว้ ซึ่ง reconcile ไม่เคยลบ
-    # MAC นั้นจะได้ 409 ตลอดไปแม้ได้รหัสใหม่ -- ทุกทางที่ปฏิเสธต้อง rollback ก่อนออก
     with get_conn() as conn, conn.cursor() as cur:
-        rejection = _reserve_pending_session(cur, voucher, ctx, real_ip, nonce, code)
-        if rejection is not None:
+        cur.execute("SELECT is_blocked FROM customer WHERE natid_hash=%s", (nid_hash,))
+        cust = cur.fetchone()
+        if cust and cust["is_blocked"]:
+            record_attempt(bucket)
+            return render_template("register.html", nonce=nonce,
+                                   error="ขอใช้งานไม่ได้ กรุณาติดต่อพนักงาน"), 403
+        # กดส่งซ้ำ/ย้อนกลับมาหน้าเดิม = ใช้คำขอที่รออยู่ ไม่สร้างใหม่ให้รกหน้าอนุมัติ
+        cur.execute("SELECT id FROM access_request WHERE mac=%s AND status='pending' "
+                    "AND expires_at > NOW() FOR UPDATE", (mac,))
+        if cur.fetchone():
+            return redirect("/request", code=303)
+        cur.execute("SELECT COUNT(*) AS n FROM access_request WHERE status='pending' "
+                    "AND expires_at > NOW()")
+        if int(cur.fetchone()["n"]) >= access.MAX_PENDING_REQUESTS:
+            app.logger.error("คำขอที่รออนุมัติเต็ม %d รายการ", access.MAX_PENDING_REQUESTS)
+            return render_template("register.html", nonce=nonce,
+                                   error="ขณะนี้มีคำขอรออยู่มาก กรุณาติดต่อพนักงานโดยตรง"), 503
+        cur.execute("UPDATE fas_context SET consumed_at=NOW() WHERE nonce_hash=%s "
+                    "AND consumed_at IS NULL AND expires_at > NOW()", (_nonce_hash(nonce),))
+        if cur.rowcount != 1:
             conn.rollback()
-            return rejection
+            return render_template("error.html", title="หน้านี้หมดอายุแล้ว",
+                                   message="กรุณาเปิดหน้าเข้าใช้งานใหม่"), 400
+        code = access.gen_request_code(cur)
+        cur.execute(
+            "INSERT INTO access_request (code, mac, ip, natid_hash, natid_enc, natid_masked, "
+            "consent_at, expires_at) VALUES (%s,%s,%s,%s,%s,%s,NOW(),"
+            f"DATE_ADD(NOW(), INTERVAL {access.REQUEST_TTL_MIN} MINUTE))",
+            (code, mac, real_ip, nid_hash, crypto.natid_encrypt(nid), masked))
 
-    audit.log("login_pending", target=code, client_ip=real_ip, detail=f"mac={ctx.clientmac}")
+    audit.log(audit.ACCESS_REQUEST, target=code, client_ip=real_ip,
+              detail=f"mac={mac} customer={masked}")
+    return redirect("/request", code=303)
 
-    return redirect(redirect_url, code=302)
+
+def _verified_mac(ip: str) -> str | None:
+    """MAC ของ IP นี้จากตาราง ARP ของเคอร์เนล (ไม่ใช่ค่าจากฟอร์ม) -- R2-L01: ถ้า cache ว่างให้กระตุ้น
+    ARP หนึ่งครั้งแล้วอ่านใหม่ แม้ ping ไม่ได้รับ ICMP reply ก็อาจได้ ARP reply"""
+    mac = resolve_mac(ip)
+    if not mac:
+        try:
+            subprocess.run(["ping", "-4", "-n", "-c", "1", "-W", "1", ip],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=2, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            app.logger.warning("กระตุ้น ARP ไม่สำเร็จ: ip=%s error=%s", ip, exc)
+        mac = resolve_mac(ip)
+    return normalize_mac(mac) if mac else None
 
 
-def _reserve_pending_session(cur, voucher, ctx, real_ip, nonce, code):
-    """จอง MAC + โควตาอุปกรณ์ + nonce แล้วสร้าง portal_session แบบ pending
-
-    คืน None ถ้าสำเร็จ หรือ response ที่ต้องส่งกลับถ้าปฏิเสธ (ผู้เรียกต้อง rollback เอง)
-    """
-    def busy():
-        return render_template("login.html", nonce=nonce,
-                               error="อุปกรณ์นี้กำลังรอยืนยันสิทธิ์ กรุณารอสักครู่แล้วลองใหม่"), 409
-
-    cur.execute("SELECT id FROM voucher WHERE id=%s FOR UPDATE", (voucher["id"],))
-    cur.fetchone()
-    cur.execute("SELECT id FROM portal_session WHERE mac=%s AND state='pending' FOR UPDATE",
-                (ctx.clientmac,))
-    if cur.fetchone():
-        return busy()
-    cur.execute("INSERT IGNORE INTO pending_mac_claim (mac) VALUES (%s)", (ctx.clientmac,))
-    if cur.rowcount != 1:
-        return busy()
-    cur.execute("SELECT COUNT(*) AS n FROM ("
-                "SELECT mac FROM device WHERE voucher_id=%s UNION "
-                "SELECT mac FROM portal_session WHERE voucher_id=%s AND state='pending' "
-                "AND pending_until > NOW()) AS reserved",
-                (voucher["id"], voucher["id"]))
-    reserved = int(cur.fetchone()["n"])
-    cur.execute("SELECT 1 FROM device WHERE voucher_id=%s AND mac=%s UNION "
-                "SELECT 1 FROM portal_session WHERE voucher_id=%s AND mac=%s "
-                "AND state='pending' AND pending_until > NOW() LIMIT 1",
-                (voucher["id"], ctx.clientmac, voucher["id"], ctx.clientmac))
-    if not cur.fetchone() and reserved >= voucher["max_devices"]:
-        audit.log(audit.LOGIN_FAIL, target=code, client_ip=real_ip,
-                  detail=f"mac={ctx.clientmac} reason=device_limit_exceeded")
-        return render_template(
-            "login.html", nonce=nonce,
-            error=f"รหัสนี้ใช้ครบ {voucher['max_devices']} อุปกรณ์แล้ว "
-            "กรุณาขอรหัสใหม่จากพนักงานหากต้องการเพิ่มอุปกรณ์"), 403
-    cur.execute("UPDATE fas_context SET consumed_at=NOW() WHERE nonce_hash=%s "
-                "AND consumed_at IS NULL AND expires_at > NOW()", (_nonce_hash(nonce),))
-    if cur.rowcount != 1:
-        return render_template("error.html", title="หน้านี้หมดอายุแล้ว",
-                               message="กรุณาเปิดหน้าเข้าใช้งานใหม่"), 400
-    cur.execute("INSERT INTO portal_session "
-                "(voucher_id, mac, ip, started_at, pending_until, state) "
-                "VALUES (%s,%s,%s,NOW(),DATE_ADD(NOW(), INTERVAL 180 SECOND),'pending')",
-                (voucher["id"], ctx.clientmac, real_ip))
-    cur.execute("UPDATE pending_mac_claim SET portal_session_id=%s WHERE mac=%s",
-                (cur.lastrowid, ctx.clientmac))
-    return None
+# ---------------------------------------------------------------- หน้ารออนุมัติ
+@app.get("/request")
+def request_status():
+    """สถานะคำขอล่าสุดของ "เครื่องนี้" -- ระบุเครื่องจาก IP จริง + ARP ไม่ต้องมี token ในลิงก์
+    (ลิงก์นี้ส่งต่อให้เครื่องอื่นดูแทนไม่ได้ เพราะเครื่องอื่นมี MAC ของตัวเอง)"""
+    ip = client_ip()
+    mac = _verified_mac(ip) if ip else None
+    if not mac:
+        return render_template("error.html", title="ไม่พบอุปกรณ์",
+                               message="เปิดหน้านี้จากเครื่องที่ต่อ Wi-Fi ของร้านเท่านั้น"), 400
+    row = query_one(
+        "SELECT ar.code, ar.status, ar.expires_at, ar.decision_note, ps.state AS session_state, "
+        "v.valid_until FROM access_request ar "
+        "LEFT JOIN portal_session ps ON ps.id = ar.portal_session_id "
+        "LEFT JOIN voucher v ON v.id = ar.voucher_id "
+        "WHERE ar.mac = %s AND ar.created_at > NOW() - INTERVAL 1 DAY "
+        "ORDER BY ar.id DESC LIMIT 1", (mac,))
+    if not row:
+        return render_template("request_status.html", state="none")
+    state = row["status"]
+    if state == "pending" and row["expires_at"] <= datetime.now():
+        state = "expired"
+    elif state == "approved":
+        state = {"authenticated": "online", "closed": "failed"}.get(row["session_state"], "opening")
+    resp = app.make_response(render_template("request_status.html", state=state, row=row))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/policy")

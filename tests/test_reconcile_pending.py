@@ -1,4 +1,6 @@
 """Gateway confirmation must match state, IP, and a new gateway session."""
+import pytest
+
 from datetime import datetime, timedelta
 
 import tools.reconcile_pending as rp
@@ -38,6 +40,17 @@ class _FakeCursor:
 
     def __exit__(self, *exc):
         return False
+
+
+ORIG_AUTHORIZE = rp.authorize_approved
+ORIG_EXPIRE = rp.expire_requests
+
+
+@pytest.fixture(autouse=True)
+def _no_request_steps(monkeypatch):
+    """เทสต์ชุดเดิมดูแค่การยืนยัน pending -- ขั้นคำขอใช้งานมีเทสต์ของตัวเองท้ายไฟล์"""
+    monkeypatch.setattr(rp, "authorize_approved", lambda: 0)
+    monkeypatch.setattr(rp, "expire_requests", lambda: 0)
 
 
 class _FakeConn:
@@ -189,3 +202,73 @@ def test_gateway_clients_failure_is_none(monkeypatch):
 
     monkeypatch.setattr(enforce, "run_ndsctl", lambda cmd, timeout=10: R())
     assert rp.gateway_clients({"AA:BB:CC:DD:EE:01"}) is None
+
+
+class _AuthCursor:
+    def __init__(self, rows):
+        self.rows, self.executed, self.rowcount = rows, [], 0
+
+    def execute(self, sql, args=()):
+        self.executed.append((" ".join(sql.split()), args))
+        self.rowcount = 2
+
+    def fetchall(self):
+        return self.rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _auth_env(monkeypatch, rows, returncode=0):
+    import tools.enforce_voucher_expiry as enforce
+    cur = _AuthCursor(rows)
+    calls = []
+
+    class R:
+        stdout = b"ok"
+
+    def fake(cmd, timeout=10):
+        calls.append(cmd)
+        r = R()
+        r.returncode = returncode
+        return r
+
+    monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
+    monkeypatch.setattr(enforce, "run_ndsctl", fake)
+    return cur, calls
+
+
+def test_authorize_approved_runs_ndsctl_auth_with_remaining_minutes(monkeypatch):
+    rows = [dict(id=5, mac="AA:BB:CC:DD:EE:01",
+                 valid_until=datetime.now() + timedelta(minutes=90, seconds=30))]
+    cur, calls = _auth_env(monkeypatch, rows)
+    assert ORIG_AUTHORIZE() == 1
+    assert calls == [["ndsctl", "auth", "aa:bb:cc:dd:ee:01", "91"]], "MAC ตัวเล็ก + นาทีที่เหลือ (ปัดขึ้น)"
+    assert any("set auth_sent_at=now()" in sql.lower() and args == (5,) for sql, args in cur.executed)
+
+
+def test_authorize_failure_is_retried_next_round(monkeypatch):
+    rows = [dict(id=5, mac="AA:BB:CC:DD:EE:01", valid_until=datetime.now() + timedelta(hours=1))]
+    cur, calls = _auth_env(monkeypatch, rows, returncode=1)
+    assert ORIG_AUTHORIZE() == 0
+    assert not any("auth_sent_at" in sql.lower() for sql, _ in cur.executed if "update" in sql.lower())
+
+
+def test_authorize_query_targets_only_unsent_pending(monkeypatch):
+    cur, calls = _auth_env(monkeypatch, [])
+    ORIG_AUTHORIZE()
+    (sql, _), = cur.executed
+    assert "ar.status='approved'" in sql and "ar.auth_sent_at is null" in sql.lower()
+    assert "ps.state='pending'" in sql
+    assert calls == []
+
+
+def test_expire_requests_clears_pii(monkeypatch):
+    cur = _AuthCursor([])
+    monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
+    assert ORIG_EXPIRE() == 2
+    (sql, _), = cur.executed
+    assert "status='expired'" in sql and "natid_hash=NULL" in sql and "natid_enc=NULL" in sql

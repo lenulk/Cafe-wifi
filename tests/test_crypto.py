@@ -36,13 +36,6 @@ def test_hash_is_deterministic_and_unique():
     assert len(crypto.natid_hash(SAMPLE)) == 64
 
 
-def test_voucher_password_has_no_ambiguous_characters():
-    for _ in range(200):
-        pw = crypto.gen_voucher_password()
-        assert len(pw) == 8
-        assert not set(pw) & set("0O1Il2Z5S")
-
-
 def test_password_hash_roundtrip():
     h = crypto.hash_password("CafeWifi2026Secure")
     assert "CafeWifi2026Secure" not in h

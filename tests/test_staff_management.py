@@ -197,7 +197,7 @@ def test_temp_password_forces_change_before_anything_else(app_mod):
     s = _client(app_mod)
     r = _login(s, "somchai", temp)
     assert r.status_code == 302 and r.headers["Location"].endswith("/account/password")
-    for path in ("/", "/issue", "/customers", "/logs"):
+    for path in ("/", "/requests", "/customers", "/logs"):
         r = s.get(path)
         assert r.status_code == 302 and r.headers["Location"].endswith("/account/password"), path
     assert "ตั้งรหัสผ่านของคุณ" in s.get("/account/password").get_data(as_text=True)
@@ -206,7 +206,7 @@ def test_temp_password_forces_change_before_anything_else(app_mod):
                                               password_confirm=NEW_PW))
     assert r.status_code == 302 and r.headers["Location"].endswith("/")
     assert STAFF[-1]["must_change_password"] == 0
-    assert s.get("/issue").status_code == 200, "ตั้งรหัสแล้ว session เดิมใช้ต่อได้"
+    assert s.get("/requests").status_code == 200, "ตั้งรหัสแล้ว session เดิมใช้ต่อได้"
     assert "password_change" in _actions()
 
 
@@ -238,11 +238,11 @@ def test_own_password_change_logs_out_other_devices(app_mod):
     phone, laptop = _client(app_mod), _client(app_mod)
     _login(phone, "owner", ADMIN_PW)
     _login(laptop, "owner", ADMIN_PW)
-    assert laptop.get("/issue").status_code == 200
+    assert laptop.get("/requests").status_code == 200
     phone.post("/account/password", data=dict(current_password=ADMIN_PW, password=NEW_PW,
                                               password_confirm=NEW_PW))
-    assert phone.get("/issue").status_code == 200
-    r = laptop.get("/issue")
+    assert phone.get("/requests").status_code == 200
+    r = laptop.get("/requests")
     assert r.status_code == 302 and "/login" in r.headers["Location"]
 
 
@@ -254,12 +254,12 @@ def test_reset_password_kicks_existing_session_and_old_password_stops_working(ap
     _login(s, "somchai", temp)
     s.post("/account/password", data=dict(current_password=temp, password=NEW_PW,
                                           password_confirm=NEW_PW))
-    assert s.get("/issue").status_code == 200
+    assert s.get("/requests").status_code == 200
 
     r = a.post(f"/staff/{STAFF[-1]['id']}/reset-password")
     new_temp = re.findall(r'<div class="cred">([^<]+)</div>', r.get_data(as_text=True))[1].strip()
     assert new_temp != temp
-    r = s.get("/issue")
+    r = s.get("/requests")
     assert r.status_code == 302 and "/login" in r.headers["Location"]
     assert _login(_client(app_mod), "somchai", NEW_PW).status_code == 401
     assert STAFF[-1]["must_change_password"] == 1
@@ -334,7 +334,7 @@ def test_staff_page_lists_accounts_and_nav_link_only_for_admin(app_mod):
     _create(a)
     html = a.get("/staff").get_data(as_text=True)
     assert "somchai" in html and "รอตั้งรหัสใหม่" in html
-    assert 'href="/staff"' in a.get("/issue").get_data(as_text=True)
+    assert 'href="/staff"' in a.get("/requests").get_data(as_text=True)
 
 
 def test_csrf_required_on_staff_actions(app_mod):

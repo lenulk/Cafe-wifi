@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}สถานะคำขอ{% endblock %}
+{% block head %}
+{# หน้ารอ: รีเฟรชเองจนกว่าจะได้ผล -- ใช้ meta refresh ไม่พึ่ง JavaScript (หน้าต่าง captive portal
+   ของบางระบบปฏิบัติการปิด JS หรือจำกัดไว้) #}
+{% if state in ("pending", "opening") %}<meta http-equiv="refresh" content="3">{% endif %}
+{% endblock %}
+{% block body %}
+<h1>{{ gateway_name }}</h1>
+
+{% if state == "pending" %}
+  <p class="sub">แสดงรหัสนี้ให้พนักงาน พร้อมบัตรประชาชนตัวจริง</p>
+  <div style="font-family:ui-monospace,monospace;font-size:3rem;letter-spacing:.3em;text-align:center;
+              font-weight:700;margin:1rem 0">{{ row.code }}</div>
+  <p class="hint">หน้านี้จะเปลี่ยนเองเมื่อพนักงานอนุมัติ — ไม่ต้องปิดหรือกดอะไร<br>
+    คำขอหมดอายุเวลา {{ row.expires_at.strftime('%H:%M') }} น.</p>
+
+{% elif state == "opening" %}
+  <p class="sub">อนุมัติแล้ว กำลังเปิดอินเทอร์เน็ตให้เครื่องนี้…</p>
+
+{% elif state == "online" %}
+  <div class="msg ok" style="text-align:center">
+    ใช้อินเทอร์เน็ตได้แล้ว{% if row.valid_until %} ถึง {{ row.valid_until.strftime('%H:%M') }} น.{% endif %}
+  </div>
+  <p class="hint">ปิดหน้านี้แล้วใช้งานได้ตามปกติ</p>
+
+{% elif state == "rejected" %}
+  <div class="msg err">คำขอไม่ได้รับอนุมัติ{% if row.decision_note %}: {{ row.decision_note }}{% endif %}</div>
+  <p class="hint">สอบถามพนักงาน หรือเปิดเว็บใดก็ได้เพื่อขอใหม่</p>
+
+{% elif state == "failed" %}
+  <div class="msg err">อนุมัติแล้วแต่เปิดอินเทอร์เน็ตให้เครื่องนี้ไม่สำเร็จ</div>
+  <p class="hint">กรุณาแจ้งพนักงาน หรือปิด-เปิด Wi-Fi แล้วขอใหม่</p>
+
+{% elif state == "expired" %}
+  <div class="msg warn">คำขอหมดอายุแล้ว (ไม่มีการอนุมัติภายใน 15 นาที)</div>
+  <p class="hint">เปิดเว็บใดก็ได้เพื่อขอใหม่</p>
+
+{% else %}
+  <p class="sub">ไม่พบคำขอของเครื่องนี้</p>
+  <p class="hint">เปิดเว็บใดก็ได้ ระบบจะพาไปหน้าขอใช้งานเอง</p>
+{% endif %}
+{% endblock %}

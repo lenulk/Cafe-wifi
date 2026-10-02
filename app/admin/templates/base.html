@@ -73,7 +73,8 @@
   <div class="brand">{{ gateway_name }} · Admin</div>
   <nav>
     <a href="{{ url_for('dashboard') }}">แดชบอร์ด</a>
-    <a href="{{ url_for('issue') }}">ออกรหัสให้ลูกค้า</a>
+    {% set n_req = pending_requests() %}
+    <a href="{{ url_for('requests_page') }}">คำขอใช้งาน{% if n_req %} <b class="badge err">{{ n_req }}</b>{% endif %}</a>
     <a href="{{ url_for('customers') }}">ลูกค้า</a>
     <a href="{{ url_for('search_logs') }}">ค้นหา log</a>
     <a href="{{ url_for('status_page') }}">สถานะระบบ</a>

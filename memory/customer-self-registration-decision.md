@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 668bce67-4ec1-453a-add8-59fc42ac7deb
-  modified: 2026-10-02T04:32:24.826Z
+  modified: 2026-10-02T04:55:11.386Z
 ---
 
 User decisions 2026-10-02 (replacing the CAFE-XXXXX code + password slip flow):
@@ -28,6 +28,14 @@ never logged, encrypted/hashed at rest, request PII purged after decision/expiry
 Design choice by Claude: staff never sees the full ID — request list shows natid_masked and staff
 types the last 4 digits from the physical card; approval only succeeds if they match (verifies card ↔
 request and blocks approving the wrong person).
+
+Implementation (2026-10-02, branch `feature/self-registration` on top of `feature/staff-accounts`, local
+only): sql/010_access_request.sql, app/common/access.py (shared reserve_pending_session), FAS POST /login =
+registration + GET /request waiting page (meta refresh, identifies device by IP+ARP, no token), Admin
+/requests (+ nav badge) with approve/reject, tools/reconcile_pending.py authorize_approved() runs
+`ndsctl auth <mac> <minutes left>` (root) + expire_requests(). Removed /issue, slips, QR (qrcode dep),
+one-time reveal crypto. `ndsctl auth mac minutes` verified on openNDS 10.1.3: works, session_end exact.
+Pi e2e (tools/lab_e2e_register.sh): wrong last4 blocked; approve → online in 5 s. 368 tests pass.
 
 **Why:** user wants a smoother counter flow than reading out codes/passwords.
 **How to apply:** don't re-propose password slips; keep the accepted-risk note in docs; related

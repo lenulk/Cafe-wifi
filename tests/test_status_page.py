@@ -200,6 +200,8 @@ class FakeCursor:
         elif s.startswith("select (select count(*) from portal_session"):
             self._rows = [{"active_sessions": 2, "conn_log_today": 7, "dns_log_today": 9,
                           "last_sealed_at": datetime(2026, 8, 26, 3, 30, 5)}]
+        elif s.startswith("select count(*) as n from access_request"):
+            self._rows = [{"n": 0}]  # ตัวเลขคำขอที่รออนุมัติบนเมนู
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:80]}")
 

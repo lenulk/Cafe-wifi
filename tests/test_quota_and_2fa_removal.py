@@ -83,6 +83,8 @@ class FakeCursor:
         elif s.startswith("insert into audit_log"):
             AUDIT.append(args)
             self.rowcount = 1
+        elif s.startswith("select count(*) as n from access_request"):
+            self._rows = [{"n": 0}]  # ตัวเลขคำขอที่รออนุมัติบนเมนู
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:80]}")
 
@@ -137,65 +139,6 @@ NID = "1101700207366"  # เลขบัตรตัวอย่างที่ 
 
 
 # ================================================================== ส่วนที่ 1: quota_mb
-
-
-def test_issue_with_quota_saved_and_shown_as_gb(client):
-    r = client.post("/issue", data=dict(natid=NID, hours="4", devices="2", quota_mb="1000",
-                                        consent="on"))
-    assert r.status_code == 302
-    assert VOUCHERS[1]["quota_mb"] == 1000
-
-    html = client.get("/issue/result").get_data(as_text=True)
-    assert "1 GB" in html
-
-
-def test_issue_with_small_quota_shown_as_mb(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", quota_mb="500",
-                                    consent="on"))
-    assert VOUCHERS[1]["quota_mb"] == 500
-    html = client.get("/issue/result").get_data(as_text=True)
-    assert "500 MB" in html
-
-
-def test_issue_without_quota_defaults_to_unlimited(client):
-    r = client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
-    assert r.status_code == 302
-    assert VOUCHERS[1]["quota_mb"] is None
-
-    html = client.get("/issue/result").get_data(as_text=True)
-    assert "ไม่จำกัด" in html
-
-
-def test_issue_rejects_non_numeric_quota(client):
-    r = client.post("/issue", data=dict(natid=NID, hours="4", devices="2", quota_mb="abc",
-                                        consent="on"))
-    assert r.status_code == 400
-    assert "โควตา" in r.get_data(as_text=True)
-    assert len(VOUCHERS) == 0
-
-
-@pytest.mark.parametrize("bad_quota", ["0", "-100"])
-def test_issue_rejects_non_positive_quota(client, bad_quota):
-    r = client.post("/issue", data=dict(natid=NID, hours="4", devices="2", quota_mb=bad_quota,
-                                        consent="on"))
-    assert r.status_code == 400
-    assert len(VOUCHERS) == 0
-
-
-def test_audit_log_records_quota_detail(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", quota_mb="2000",
-                                    consent="on"))
-    assert len(AUDIT) == 1
-    assert "quota_mb=2000" in AUDIT[0][4]
-
-
-def test_audit_log_records_unlimited_when_quota_not_given(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
-    assert len(AUDIT) == 1
-    assert "quota_mb=unlimited" in AUDIT[0][4]
-
-
-# ================================================================== ส่วนที่ 2: ถอด 2FA
 
 
 def test_requirements_txt_does_not_pin_pyotp():

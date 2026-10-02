@@ -637,7 +637,7 @@ setup_python() {
     # มาก่อนแล้ว (ไม่มี qrcode ที่ N7 เพิ่งเพิ่ม) -- ถือโอกาสซิงค์ให้ตรงพร้อมกันตอนถอด pyotp
     # ออก (2FA ตัดสินใจไม่ทำ ดู sql/006_drop_totp.sql) ไม่งั้นเครื่องที่ไม่มี requirements.txt
     # (กรณีสำรองเท่านั้น ปกติมีเสมอ) จะติดตั้งแพ็กเกจไม่ครบ/เกินความจำเป็นแบบเงียบ ๆ
-    run_sh "'${VENV_DIR}/bin/pip' install --quiet Flask gunicorn PyMySQL cryptography argon2-cffi qrcode"
+    run_sh "'${VENV_DIR}/bin/pip' install --quiet Flask gunicorn PyMySQL cryptography argon2-cffi"
   fi
   ok "Python environment พร้อม (${VENV_DIR})"
 }
@@ -758,6 +758,15 @@ SQL
     ok "อัปเดตสคีมาบัญชีพนักงานแล้ว"
   else
     die "ไม่พบ sql/009_staff_password_lifecycle.sql — Admin Panel ต้องใช้คอลัมน์ในไฟล์นี้"
+  fi
+
+  # ลูกค้าขอใช้งานบน portal แล้วพนักงานอนุมัติ (แทนสลิปรหัสผ่าน)
+  local accessreq="${SCRIPT_DIR}/sql/010_access_request.sql"
+  if [[ -f "$accessreq" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${accessreq}'"
+    ok "สร้างตารางคำขอใช้งานแล้ว"
+  else
+    die "ไม่พบ sql/010_access_request.sql — portal และหน้าอนุมัติต้องใช้ตารางนี้"
   fi
 
 

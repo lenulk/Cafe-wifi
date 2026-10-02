@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}ขอใช้งาน Wi-Fi{% endblock %}
+{% block body %}
+<h1>{{ gateway_name }}</h1>
+<p class="sub">กรอกเลขบัตรประชาชนเพื่อขอใช้อินเทอร์เน็ต แล้วแสดงรหัสคำขอให้พนักงานพร้อมบัตรจริง</p>
+
+{% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+
+<form method="post" autocomplete="off">
+  <input type="hidden" name="nonce" value="{{ nonce }}">
+
+  <label for="natid">เลขบัตรประชาชน 13 หลัก</label>
+  {# type=password: กันคนข้าง ๆ มองเห็นเลขบนจอ · autocomplete=off: ไม่ให้เบราว์เซอร์จำเลขบัตรไว้ #}
+  <input type="password" id="natid" name="natid" required autofocus
+         inputmode="numeric" pattern="[0-9 -]{13,17}" maxlength="17" autocomplete="off"
+         placeholder="ตัวเลข 13 หลัก">
+
+  <label style="display:flex;gap:.5rem;align-items:flex-start;font-weight:400">
+    <input type="checkbox" name="consent" required style="margin-top:.2rem">
+    <span>ยอมรับ<a href="/policy">นโยบายความเป็นส่วนตัว</a> — ร้านเก็บเลขบัตรแบบเข้ารหัสและข้อมูลการใช้งาน
+      อย่างน้อย 90 วันตาม พ.ร.บ.คอมพิวเตอร์ มาตรา 26</span>
+  </label>
+
+  <button type="submit">ขอใช้งาน</button>
+</form>
+<p class="hint">พนักงานจะตรวจบัตรประชาชนตัวจริงก่อนอนุมัติทุกครั้ง</p>
+{% endblock %}

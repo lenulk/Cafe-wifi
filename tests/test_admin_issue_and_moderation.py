@@ -109,6 +109,8 @@ class FakeCursor:
                          for c in CUSTOMERS.values()]
         elif s.startswith("select"):
             self._rows = []
+        elif s.startswith("select count(*) as n from access_request"):
+            self._rows = [{"n": 0}]  # ตัวเลขคำขอที่รออนุมัติบนเมนู
         else:
             raise AssertionError(f"FakeCursor ไม่รู้จัก SQL: {s[:80]}")
 
@@ -167,41 +169,20 @@ def client(monkeypatch):
 NID = "1101700207366"  # เลขบัตรตัวอย่างที่ checksum ผ่าน (ใช้ซ้ำจาก test_thai_id.py ได้)
 
 
-def test_issue_then_result_shows_password_once_then_redirects(client):
-    """บั๊กเดิม (M6): เคย render ผลลัพธ์ตรงจาก POST -- refresh = ออก voucher ซ้ำ"""
-    r = client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
-    assert r.status_code == 302
-    assert "/issue/result" in r.headers["Location"]
-
-    html = client.get("/issue/result").get_data(as_text=True)
-    assert "CAFE-" in html  # แสดงรหัสวอเชอร์
-
-    # เข้าหน้าเดิมซ้ำ (จำลอง refresh) -- session ถูก pop ไปแล้ว ต้องไม่เห็นรหัสอีก ไม่ออกซ้ำ
-    r2 = client.get("/issue/result")
-    assert r2.status_code == 302 and "/issue" in r2.headers["Location"]
-    assert len(VOUCHERS) == 1, "refresh ต้องไม่ออก voucher ใบที่สอง"
-
-
-def test_issue_cookie_contains_only_reveal_token(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
-    with client.session_transaction() as sess:
-        assert "issue_token" in sess
-        assert "just_issued" not in sess
-        assert "password" not in str(dict(sess))
-    assert len(REVEALS) == 1
-    assert b"password" not in next(iter(REVEALS.values()))["payload"]
-
-
-def test_issue_rejects_non_numeric_hours_with_friendly_error(client):
-    """บั๊กเดิม: int('abc') พัง 500 ดิบ -- ตอนนี้ต้องได้ 400 พร้อมข้อความอ่านออก"""
-    r = client.post("/issue", data=dict(natid=NID, hours="abc", devices="2", consent="on"))
-    assert r.status_code == 400
-    assert "ตัวเลข" in r.get_data(as_text=True)
-    assert len(VOUCHERS) == 0
+def _seed_voucher():
+    """ลูกค้า 1 คน + voucher ที่ใช้ได้ 1 ใบ (เดิมสร้างผ่าน /issue ซึ่งเลิกใช้แล้ว -- คำขอ+อนุมัติแทน)"""
+    _ids["customer"] += 1
+    cid = _ids["customer"]
+    CUSTOMERS[cid] = dict(id=cid, natid_hash=crypto.natid_hash(NID), natid_enc=crypto.natid_encrypt(NID),
+                          natid_masked=crypto.mask_natid(NID), is_blocked=False,
+                          first_seen="now", last_seen="now", visit_count=1)
+    _ids["voucher"] += 1
+    VOUCHERS[_ids["voucher"]] = dict(id=_ids["voucher"], customer_id=cid, username="CAFE-SEED1",
+                                     status="active")
 
 
 def test_revoke_voucher_sets_status_and_is_idempotent_safe(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
+    _seed_voucher()
     vid = next(iter(VOUCHERS))
     assert VOUCHERS[vid]["status"] == "active"
 
@@ -216,7 +197,7 @@ def test_revoke_voucher_sets_status_and_is_idempotent_safe(client):
 
 
 def test_toggle_block_customer_requires_admin_and_toggles(client):
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
+    _seed_voucher()
     cid = next(iter(CUSTOMERS))
     assert CUSTOMERS[cid]["is_blocked"] is False
 
@@ -231,7 +212,7 @@ def test_toggle_block_customer_requires_admin_and_toggles(client):
 
 def test_dashboard_renders_with_revoke_button_for_active_voucher(client):
     """สโมคเทสต์: dashboard.html ต้อง render ได้จริงกับ v.id คอลัมน์ใหม่ (ไม่ใช่แค่ backend)"""
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
+    _seed_voucher()
     html = client.get("/").get_data(as_text=True)
     assert "ยกเลิก" in html
     vid = next(iter(VOUCHERS))
@@ -240,7 +221,7 @@ def test_dashboard_renders_with_revoke_button_for_active_voucher(client):
 
 def test_customers_page_renders_block_button_for_admin(client):
     """สโมคเทสต์: customers.html ต้อง render ปุ่มระงับ/ยกเลิกระงับได้จริง"""
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
+    _seed_voucher()
     html = client.get("/customers").get_data(as_text=True)
     cid = next(iter(CUSTOMERS))
     assert f"/customers/{cid}/block" in html
@@ -251,7 +232,7 @@ def test_toggle_block_customer_rejected_for_non_admin_staff(client, monkeypatch)
     monkeypatch.setitem(STAFF[0], "role", "staff")
     with client.session_transaction() as sess:
         sess["role"] = "staff"
-    client.post("/issue", data=dict(natid=NID, hours="4", devices="2", consent="on"))
+    _seed_voucher()
     cid = next(iter(CUSTOMERS))
     r = client.post(f"/customers/{cid}/block")
     assert r.status_code == 403

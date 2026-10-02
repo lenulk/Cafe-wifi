@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}คำขอใช้งาน{% endblock %}
+{% block body %}
+<div class="card">
+  <h1>คำขอใช้งานที่รออนุมัติ</h1>
+  <p class="hint">
+    ลูกค้ากรอกเลขบัตรบนหน้า Wi-Fi แล้วได้รหัสคำขอ 4 ตัว · ดูรหัสบนจอลูกค้าให้ตรงกับแถวในตาราง
+    → <strong>ตรวจบัตรประชาชนตัวจริง</strong> → พิมพ์เลข 4 ตัวท้ายจากบัตร → อนุมัติ
+    (ระบบเทียบกับที่ลูกค้ากรอก ถ้าไม่ตรงจะไม่ยอมอนุมัติ) · หน้านี้รีเฟรชเองทุก 5 วินาทีเมื่อไม่ได้พิมพ์อยู่
+  </p>
+
+  {% if not pending %}
+    <p class="hint" style="text-align:center;padding:1.5rem 0">ยังไม่มีคำขอ</p>
+  {% endif %}
+
+  {% for r in pending %}
+  <div class="card" style="margin:1rem 0;border-width:2px">
+    <div style="display:flex;gap:1.5rem;align-items:baseline;flex-wrap:wrap">
+      <div class="cred" style="font-size:2.2rem;margin:0">{{ r.code }}</div>
+      <div>
+        <div class="mono">{{ r.natid_masked }}</div>
+        <div class="hint">เครื่อง …{{ r.mac_tail }} · ขอเมื่อ {{ r.created_at.strftime('%H:%M') }}
+          · หมดอายุ {{ r.expires_at.strftime('%H:%M') }}</div>
+      </div>
+      <div>
+        {% if r.customer and r.customer.is_blocked %}
+          <span class="badge err">ลูกค้าถูกระงับ</span>
+        {% elif r.voucher %}
+          <span class="badge ok">มีสิทธิ์อยู่แล้ว ถึง {{ r.voucher.valid_until.strftime('%H:%M') }}
+            · ใช้ {{ r.devices_used }}/{{ r.voucher.max_devices }} เครื่อง</span>
+        {% elif r.customer %}
+          <span class="badge warn">ลูกค้าเก่า (มา {{ r.customer.visit_count }} ครั้ง)</span>
+        {% else %}
+          <span class="badge warn">ลูกค้าใหม่</span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if not (r.customer and r.customer.is_blocked) %}
+    <form method="post" action="{{ url_for('approve_request', rid=r.id) }}" autocomplete="off"
+          style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:flex-end;margin-top:.75rem">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div>
+        <label for="last4-{{ r.id }}">4 ตัวท้ายจากบัตร</label>
+        <input type="text" id="last4-{{ r.id }}" name="last4" required inputmode="numeric"
+               pattern="[0-9]{4}" maxlength="4" class="mono" style="width:6rem" autocomplete="off">
+      </div>
+      {% if not r.voucher %}
+      <div>
+        <label for="hours-{{ r.id }}">ชั่วโมง</label>
+        <select id="hours-{{ r.id }}" name="hours">
+          {% for h in hours_choices %}<option value="{{ h }}" {% if h == 4 %}selected{% endif %}>{{ h }} ชม.</option>{% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="devices-{{ r.id }}">เครื่อง</label>
+        <input type="number" id="devices-{{ r.id }}" name="devices" min="1" max="5" value="2" style="width:4.5rem">
+      </div>
+      <div>
+        <label for="quota-{{ r.id }}">โควตา</label>
+        <select id="quota-{{ r.id }}" name="quota_mb">
+          <option value="" selected>ไม่จำกัด</option>
+          <option value="500">500 MB</option>
+          <option value="1000">1 GB</option>
+          <option value="2000">2 GB</option>
+          <option value="5000">5 GB</option>
+        </select>
+      </div>
+      {% else %}
+      <div class="hint" style="max-width:16rem">เครื่องนี้จะเข้าสิทธิ์เดิมที่ยังเหลืออยู่ (เวลา/โควตาร่วมกัน)</div>
+      {% endif %}
+      <button type="submit">อนุมัติ</button>
+    </form>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('reject_request', rid=r.id) }}" style="margin-top:.5rem"
+          onsubmit="return confirm('ปฏิเสธคำขอ {{ r.code }}?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="text" name="reason" maxlength="255" placeholder="เหตุผล (ไม่บังคับ) เช่น ไม่มีบัตรมาแสดง"
+             style="width:auto;display:inline-block">
+      <button class="ghost" type="submit">ปฏิเสธ</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+
+{% if recent %}
+<div class="card">
+  <h2>ล่าสุด</h2>
+  <table>
+    <tr><th>รหัส</th><th>ลูกค้า</th><th>ผล</th><th>โดย</th><th>เวลา</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td class="mono">{{ r.code }}</td>
+      <td class="mono">{{ r.natid_masked }}</td>
+      <td>{{ 'อนุมัติ' if r.status == 'approved' else 'ปฏิเสธ' }}{% if r.decision_note %} — {{ r.decision_note }}{% endif %}</td>
+      <td>{{ r.decided_by or '-' }}</td>
+      <td>{{ r.decided_at.strftime('%H:%M') if r.decided_at else '-' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<script>
+  // รีเฟรชเพื่อให้คำขอใหม่โผล่เอง แต่ไม่รีเฟรชระหว่างพนักงานกำลังพิมพ์ (ข้อมูลในช่องจะหาย)
+  setInterval(function () {
+    var typing = Array.prototype.some.call(document.querySelectorAll('input[type=text],input[type=number]'),
+      function (el) { return el.value && el.type === 'text'; }) || document.activeElement.tagName === 'INPUT'
+      || document.activeElement.tagName === 'SELECT';
+    if (!typing) location.reload();
+  }, 5000);
+</script>
+{% endblock %}

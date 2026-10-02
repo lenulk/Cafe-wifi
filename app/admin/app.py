@@ -13,6 +13,7 @@ import ipaddress
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -23,11 +24,10 @@ from urllib.parse import urlsplit
 from flask import (Flask, abort, flash, g, redirect, render_template,
                    request, session, url_for)
 
-from common import audit, crypto
+from common import access, audit, crypto
 from common.customer import PURGED_MARK, anonymize_customer, retention_hold_until
 from common.db import execute, get_conn, query_all, query_one
 from common.log_mapping import conn_mapping_join, dns_mapping_join
-from common.qr import voucher_qr_svg
 from logger.integrity import SqlManifestStore, verify_chain
 
 ETC_DIR = Path(os.environ.get("ETC_DIR", "/etc/cafe-wifi"))
@@ -48,7 +48,7 @@ app.config.update(
 
 @app.after_request
 def no_cache_sensitive(response):
-    if request.path == "/issue/result" or request.path.endswith("/reveal"):
+    if request.path.endswith("/reveal") or request.path == "/requests":
         response.headers["Cache-Control"] = "no-store"
     return response
 if not os.environ.get("SECRET_KEY"):
@@ -206,7 +206,15 @@ def inject_globals():
         "current_role": session.get("role"),
         "now": datetime.now(),
         "csrf_token": csrf_token,
+        "pending_requests": _pending_request_count,
     }
+
+
+def _pending_request_count() -> int:
+    """จำนวนคำขอที่รออนุมัติ แสดงเป็นตัวเลขบนเมนู (เรียกจาก template เฉพาะหน้าที่ login แล้ว)"""
+    row = query_one("SELECT COUNT(*) AS n FROM access_request WHERE status='pending' "
+                    "AND expires_at > NOW()")
+    return int((row or {}).get("n") or 0)
 
 
 @app.get("/health")
@@ -551,125 +559,162 @@ def dashboard():
     return render_template("dashboard.html", stats=stats, recent=recent)
 
 
-# ---------------------------------------------------------------- ออก voucher
-@app.route("/issue", methods=["GET", "POST"])
-@login_required
-def issue():
-    if request.method == "GET":
-        return render_template("issue.html")
+# ---------------------------------------------------------------- คำขอใช้งาน (แทนการออกรหัส)
+# 2026-10-02 เลิกใช้สลิป CAFE-XXXXX + รหัสผ่าน: ลูกค้ากรอกเลขบัตรบน portal เอง ได้รหัสคำขอ 4 ตัว
+# พนักงานตรวจบัตรจริงแล้วอนุมัติที่นี่ -- cafe-reconcile (root) สั่ง ndsctl auth เปิดสิทธิ์ให้เครื่องนั้น
+# พนักงานไม่เห็นเลขบัตรเต็มบนจอ (§6.2): เห็นแบบ masked และต้องพิมพ์ 4 ตัวท้ายจากบัตรจริง ระบบเทียบ
+# กับที่ลูกค้ากรอกให้ -- ยืนยันว่าบัตรที่ถืออยู่ตรงกับคำขอ และกันกดอนุมัติผิดคำขอ
+PACKAGE_HOURS = (1, 2, 3, 4, 8, 12, 24)
 
-    raw = request.form.get("natid", "")
-    # บั๊กเดิม: int(...) โดยไม่ดัก ValueError -- กรอกอะไรที่ไม่ใช่ตัวเลขในช่อง
-    # hours/devices จะทำให้ 500 ดิบ ๆ หลุดออกไป (ไม่มี @app.errorhandler(500) ในไฟล์นี้ด้วย)
-    # N8 (CODING_BRIEF.md): quota_mb เดิมมีตรรกะบังคับใช้พร้อมแล้วใน enforce_voucher_expiry.py
-    # (mark_used_up_vouchers) แต่หน้านี้ไม่เคยส่งค่าเข้า INSERT เลยสักครั้ง -- ต่อสายให้ครบ
+
+def _parse_package():
+    """ชั่วโมง/จำนวนเครื่อง/โควตาของสิทธิ์ใหม่ -- คืน (hours, devices, quota_mb) หรือ None ถ้าค่าไม่ถูก"""
     quota_raw = (request.form.get("quota_mb") or "").strip()
     try:
         hours = max(1, min(24, int(request.form.get("hours") or 4)))
         devices = max(1, min(5, int(request.form.get("devices") or 2)))
-        quota_mb: int | None = None
-        if quota_raw:
-            quota_mb = int(quota_raw)
-            if quota_mb <= 0:
-                raise ValueError
+        quota_mb: int | None = int(quota_raw) if quota_raw else None
+        if quota_mb is not None and quota_mb <= 0:
+            raise ValueError
     except ValueError:
-        return render_template("issue.html", error="จำนวนชั่วโมง/อุปกรณ์/โควตาต้องเป็นตัวเลข",
-                               natid=raw), 400
-    consent = request.form.get("consent") == "on"
+        return None
+    return hours, devices, quota_mb
 
-    nid = crypto.normalize_natid(raw)
-    if not consent:
-        return render_template("issue.html", error="ต้องแจ้งลูกค้าและได้รับความยินยอมก่อน",
-                               natid=raw), 400
-    if not crypto.valid_thai_id(nid):
-        return render_template("issue.html",
-                               error="เลขประจำตัวประชาชนไม่ถูกต้อง (ตรวจ checksum ไม่ผ่าน)",
-                               natid=raw), 400
 
-    nid_hash = crypto.natid_hash(nid)
-    masked = crypto.mask_natid(nid)
-    code = crypto.gen_voucher_code()
-    plain_pw = crypto.gen_voucher_password()
-    now = datetime.now()
-    reveal_token = secrets.token_urlsafe(32)
-    reveal_hash = hashlib.sha256(reveal_token.encode("ascii")).hexdigest()
+def _active_voucher(cur, customer_id: int, lock: bool = False):
+    cur.execute("SELECT id, username, max_devices, valid_until, quota_mb, used_mb FROM voucher "
+                "WHERE customer_id=%s AND status='active' AND valid_until > NOW() "
+                "ORDER BY valid_until DESC LIMIT 1" + (" FOR UPDATE" if lock else ""), (customer_id,))
+    return cur.fetchone()
+
+
+@app.get("/requests")
+@login_required
+def requests_page():
+    rows = query_all("SELECT id, code, mac, natid_hash, natid_masked, created_at, expires_at "
+                     "FROM access_request WHERE status='pending' AND expires_at > NOW() ORDER BY id")
+    pending = []
+    with get_conn() as conn, conn.cursor() as cur:
+        for r in rows:
+            cur.execute("SELECT id, is_blocked, visit_count FROM customer WHERE natid_hash=%s",
+                        (r["natid_hash"],))
+            cust = cur.fetchone()
+            voucher = _active_voucher(cur, cust["id"]) if cust else None
+            used = 0
+            if voucher:
+                cur.execute("SELECT COUNT(*) AS n FROM device WHERE voucher_id=%s", (voucher["id"],))
+                used = int((cur.fetchone() or {}).get("n", 0))
+            # natid_hash ไม่ส่งต่อไปถึง template
+            pending.append(dict(id=r["id"], code=r["code"], mac_tail=r["mac"][-5:],
+                                natid_masked=r["natid_masked"], created_at=r["created_at"],
+                                expires_at=r["expires_at"], customer=cust, voucher=voucher,
+                                devices_used=used))
+    recent = query_all(
+        "SELECT ar.code, ar.natid_masked, ar.status, ar.decided_at, ar.decision_note, "
+        "s.username AS decided_by FROM access_request ar LEFT JOIN staff s ON s.id = ar.decided_by "
+        "WHERE ar.status IN ('approved','rejected') ORDER BY ar.decided_at DESC LIMIT 10")
+    return render_template("requests.html", pending=pending, recent=recent,
+                           hours_choices=PACKAGE_HOURS)
+
+
+@app.post("/requests/<int:rid>/approve")
+@login_required
+def approve_request(rid: int):
+    last4 = re.sub(r"\D", "", request.form.get("last4", ""))
+    package = _parse_package()
+    if package is None:
+        flash("ชั่วโมง/จำนวนเครื่อง/โควตาต้องเป็นตัวเลข", "err")
+        return redirect(url_for("requests_page"))
+    hours, devices, quota_mb = package
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, is_blocked FROM customer WHERE natid_hash = %s", (nid_hash,))
+        cur.execute("SELECT id, code, mac, ip, natid_hash, natid_enc, natid_masked, status, "
+                    "expires_at FROM access_request WHERE id=%s FOR UPDATE", (rid,))
+        req = cur.fetchone()
+        if not req or req["status"] != "pending" or req["expires_at"] <= datetime.now():
+            flash("คำขอนี้หมดอายุหรือถูกจัดการไปแล้ว", "err")
+            return redirect(url_for("requests_page"))
+        nid = crypto.natid_decrypt(req["natid_enc"])
+        if len(last4) != 4 or not secrets.compare_digest(last4, nid[-4:]):
+            audit.log_required(audit.REQUEST_MISMATCH, staff_id=session["staff_id"],
+                               target=req["code"], client_ip=g.client_ip,
+                               detail=f"customer={req['natid_masked']}", cursor=cur)
+            flash(f"คำขอ {req['code']}: เลข 4 ตัวท้ายบนบัตรไม่ตรงกับที่ลูกค้ากรอก — "
+                  "ตรวจบัตรอีกครั้ง หรือให้ลูกค้าขอใหม่", "err")
+            return redirect(url_for("requests_page"))
+
+        cur.execute("SELECT id, is_blocked FROM customer WHERE natid_hash=%s FOR UPDATE",
+                    (req["natid_hash"],))
         cust = cur.fetchone()
         if cust and cust["is_blocked"]:
-            return render_template("issue.html",
-                                   error="ลูกค้ารายนี้ถูกระงับการใช้งาน", natid=raw), 403
+            flash(f"คำขอ {req['code']}: ลูกค้ารายนี้ถูกระงับการใช้งาน", "err")
+            return redirect(url_for("requests_page"))
         if cust:
             cust_id = cust["id"]
             cur.execute("UPDATE customer SET last_seen = NOW(), visit_count = visit_count + 1 "
                         "WHERE id = %s", (cust_id,))
         else:
-            cur.execute(
-                "INSERT INTO customer (natid_hash, natid_enc, natid_masked, last_seen, visit_count) "
-                "VALUES (%s, %s, %s, NOW(), 1)",
-                (nid_hash, crypto.natid_encrypt(nid), masked))
+            cur.execute("INSERT INTO customer (natid_hash, natid_enc, natid_masked, last_seen, "
+                        "visit_count) VALUES (%s, %s, %s, NOW(), 1)",
+                        (req["natid_hash"], req["natid_enc"], req["natid_masked"]))
             cust_id = cur.lastrowid
 
-        cur.execute(
-            "INSERT INTO voucher (customer_id, username, password_hash, issued_by, "
-            "valid_from, valid_until, max_devices, quota_mb, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')",
-            (cust_id, code, crypto.hash_password(plain_pw), session["staff_id"],
-             now, now + timedelta(hours=hours), devices, quota_mb))
-        reveal_data = dict(code=code, password=plain_pw, masked=masked,
-                           valid_until=(now + timedelta(hours=hours)).isoformat(),
-                           devices=devices, quota_mb=quota_mb)
-        cur.execute("INSERT INTO voucher_reveal (token_hash, staff_id, payload, expires_at) "
-                    "VALUES (%s,%s,%s,%s)",
-                    (reveal_hash, session["staff_id"],
-                     crypto.encrypt_one_time(json.dumps(reveal_data).encode("utf-8")),
-                     now + timedelta(minutes=5)))
-        audit.log_required(audit.ISSUE_VOUCHER, staff_id=session["staff_id"], target=code,
-                           client_ip=g.client_ip,
-                           detail=f"customer={masked} hours={hours} devices={devices} "
-                                  f"quota_mb={quota_mb or 'unlimited'}", cursor=cur)
+        # มีสิทธิ์ที่ยังใช้ได้อยู่ = เครื่องนี้เข้าสิทธิ์เดิม (เวลา/โควตา/จำนวนเครื่องร่วมกัน) ไม่ออกใบใหม่ซ้อน
+        voucher = _active_voucher(cur, cust_id, lock=True)
+        reused = voucher is not None
+        if not reused:
+            now = datetime.now()
+            code = crypto.gen_voucher_code()
+            # ไม่มีทาง login ด้วยรหัสผ่านแล้ว แต่คอลัมน์บังคับ NOT NULL -- ใส่ hash ของค่าสุ่มที่ไม่มีใครรู้
+            cur.execute(
+                "INSERT INTO voucher (customer_id, username, password_hash, issued_by, "
+                "valid_from, valid_until, max_devices, quota_mb, status) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active')",
+                (cust_id, code, crypto.hash_password(secrets.token_urlsafe(32)),
+                 session["staff_id"], now, now + timedelta(hours=hours), devices, quota_mb))
+            voucher = dict(id=cur.lastrowid, username=code, max_devices=devices)
 
-    # บั๊กเดิม (M6): เคย render ผลลัพธ์ตรง ๆ จาก POST -- กด F5 ที่หน้านั้นคือส่ง POST ซ้ำ
-    # ได้ voucher ใบใหม่ให้ลูกค้าคนเดิมทันทีโดยไม่ตั้งใจ -- เปลี่ยนเป็น POST-Redirect-GET
-    # เก็บรหัสผ่านไว้ใน session ชั่วคราว (เห็นได้ครั้งเดียว, pop ทิ้งทันทีที่อ่าน เหมือน flash)
-    session["issue_token"] = reveal_token
-    return redirect(url_for("issue_result"))
+        error, session_id = access.reserve_pending_session(cur, voucher, req["mac"], req["ip"])
+        if error:
+            conn.rollback()
+            flash(f"คำขอ {req['code']}: {error}", "err")
+            return redirect(url_for("requests_page"))
+
+        # เลขบัตรย้ายไปอยู่ใน customer แล้ว -- สำเนาในคำขอไม่จำเป็นอีก ล้างทิ้งทันที
+        cur.execute("UPDATE access_request SET status='approved', decided_at=NOW(), decided_by=%s, "
+                    "voucher_id=%s, portal_session_id=%s, natid_hash=NULL, natid_enc=NULL "
+                    "WHERE id=%s", (session["staff_id"], voucher["id"], session_id, rid))
+        package_note = ("เข้าสิทธิ์เดิม" if reused else
+                        f"hours={hours} devices={devices} quota_mb={quota_mb or 'unlimited'}")
+        audit.log_required(audit.REQUEST_APPROVE, staff_id=session["staff_id"],
+                           target=voucher["username"], client_ip=g.client_ip,
+                           detail=f"request={req['code']} mac={req['mac']} "
+                                  f"customer={req['natid_masked']} {package_note}", cursor=cur)
+
+    flash(f"อนุมัติคำขอ {req['code']} แล้ว — เครื่องของลูกค้าจะใช้งานได้ภายในไม่กี่วินาที"
+          + (" (เข้าสิทธิ์เดิมที่ยังเหลืออยู่)" if reused else ""), "success")
+    return redirect(url_for("requests_page"))
 
 
-# N7 (CODING_BRIEF.md): KPI §14 ตั้งไว้ว่าออก voucher 1 ใบ ≤ 30 วินาที -- ถ้าพนักงานต้องอ่าน
-# รหัส 8 ตัวให้ลูกค้าฟังทีละตัวแล้วลูกค้าพิมพ์บนคีย์บอร์ดมือถือ เกิน 30 วินาทีแน่นอน เพิ่ม QR
-# ให้สแกนแทน (ดูข้อจำกัดว่าทำไมไม่ใช่ลิงก์ auto-login ใน docstring ของ common/qr.py)
-@app.get("/issue/result")
+@app.post("/requests/<int:rid>/reject")
 @login_required
-def issue_result():
-    token = session.get("issue_token")
-    if not token:
-        return redirect(url_for("issue"))
-    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+def reject_request(rid: int):
+    note = (request.form.get("reason") or "").strip()[:255] or None
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT payload, expires_at, consumed_at, staff_id FROM voucher_reveal "
-                    "WHERE token_hash=%s FOR UPDATE", (token_hash,))
-        row = cur.fetchone()
-        if not row or row["staff_id"] != session["staff_id"] or row["consumed_at"] \
-                or row["expires_at"] <= datetime.now():
-            session.pop("issue_token", None)
-            return redirect(url_for("issue"))
-        data = json.loads(crypto.decrypt_one_time(row["payload"]).decode("utf-8"))
-        cur.execute("UPDATE voucher_reveal SET consumed_at=NOW() WHERE token_hash=%s",
-                    (token_hash,))
-    session.pop("issue_token", None)
-    # QR/สลิปไม่มีเลขบัตรสักหลัก -- สลิปที่ลูกค้าลืมไว้บนโต๊ะต้องไม่เปิดเผยอะไรเพิ่ม ลูกค้ารู้เลขบัตรตัวเองอยู่แล้ว
-    qr_text = (f"{os.environ.get('GATEWAY_NAME', 'Cafe-Guest')}\n"
-              f"User: เลขบัตรประชาชน 4 ตัวท้าย\nPass: {data['password']}")
-    quota_mb = data.get("quota_mb")
-    quota_label = "ไม่จำกัด" if not quota_mb else (
-        f"{quota_mb / 1000:g} GB" if quota_mb >= 1000 else f"{quota_mb} MB")
-    return render_template("issue_result.html", code=data["code"], password=data["password"],
-                           masked=data["masked"],
-                           valid_until=datetime.fromisoformat(data["valid_until"]),
-                           devices=data["devices"], quota_label=quota_label,
-                           qr_svg=voucher_qr_svg(qr_text))
+        cur.execute("SELECT code, natid_masked FROM access_request WHERE id=%s AND status='pending' "
+                    "FOR UPDATE", (rid,))
+        req = cur.fetchone()
+        if not req:
+            flash("คำขอนี้ถูกจัดการไปแล้ว", "err")
+            return redirect(url_for("requests_page"))
+        cur.execute("UPDATE access_request SET status='rejected', decided_at=NOW(), decided_by=%s, "
+                    "decision_note=%s, natid_hash=NULL, natid_enc=NULL WHERE id=%s",
+                    (session["staff_id"], note, rid))
+        audit.log_required(audit.REQUEST_REJECT, staff_id=session["staff_id"], target=req["code"],
+                           client_ip=g.client_ip,
+                           detail=f"customer={req['natid_masked']} reason={note or '-'}", cursor=cur)
+    flash(f"ปฏิเสธคำขอ {req['code']} แล้ว", "success")
+    return redirect(url_for("requests_page"))
 
 
 # ---------------------------------------------------------------- ลูกค้า
