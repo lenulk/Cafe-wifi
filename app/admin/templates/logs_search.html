@@ -1,109 +1,140 @@
 {% extends "base.html" %}
 {% block title %}ค้นหา log{% endblock %}
+{% macro find(value, label=None) -%}
+  {# คลิกค่าในตารางเพื่อค้นต่อด้วยค่านั้น (ช่วงเวลา/แท็บเดิม) #}
+  <a class="mono" href="{{ url_for('search_logs', **dict(params, q=value, page=1)) }}">{{ label or value }}</a>
+{%- endmacro %}
 {% block body %}
+<style>
+  .tabs{display:flex;gap:.25rem;border-bottom:1px solid var(--line);margin:-.25rem 0 1rem}
+  .tabs a{padding:.55rem 1rem;border-radius:8px 8px 0 0;color:var(--muted);text-decoration:none}
+  .tabs a.on{background:var(--accent);color:var(--accent-ink);font-weight:600}
+  .ranges{display:flex;flex-wrap:wrap;gap:.4rem;margin:.4rem 0}
+  .ranges label{margin:0;font-weight:400;border:1px solid var(--line);border-radius:999px;
+                padding:.3rem .85rem;cursor:pointer}
+  .ranges input{display:none}
+  .ranges input:checked + span{font-weight:700;color:var(--accent)}
+  .ranges label:has(input:checked){border-color:var(--accent)}
+  .searchrow{display:flex;gap:.5rem}
+  .searchrow input{flex:1}
+  .muted{color:var(--muted)}
+  td a.mono{text-decoration:none;border-bottom:1px dotted var(--muted);color:inherit}
+</style>
+
 <div class="card">
   <h1>ค้นหา log ย้อนหลัง</h1>
-  <p class="hint">
-    ค้นได้ทั้ง conn_log (การเชื่อมต่อ) และ dns_log (DNS query) — <strong>ต้องระบุช่วงเวลาเสมอ</strong>
-    (ห้ามค้นแบบไม่จำกัดช่วง) แสดงตัวตนเฉพาะรายการที่ตรงกับ session ที่ยืนยันแล้วเพียงรายการเดียว
-    (เลขบัตรแสดงแบบ masked เท่านั้น)
-  </p>
+  <nav class="tabs">
+    <a href="{{ url_for('search_logs', **dict(params, log_type='conn', page=1)) }}"
+       class="{{ 'on' if params.log_type == 'conn' }}">การเชื่อมต่อ (IP/ปลายทาง)</a>
+    <a href="{{ url_for('search_logs', **dict(params, log_type='dns', page=1)) }}"
+       class="{{ 'on' if params.log_type == 'dns' }}">เว็บที่เรียก (DNS)</a>
+  </nav>
 
   {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
 
-  <form method="get">
-    <label>ประเภท log</label>
-    <div style="display:flex;gap:1.5rem;margin:.3rem 0">
-      <label style="font-weight:400;display:flex;gap:.4rem;align-items:center;margin:0">
-        <input type="radio" name="log_type" value="conn" style="width:auto"
-               {{ 'checked' if log_type != 'dns' }}> conn_log (การเชื่อมต่อ / IP)
-      </label>
-      <label style="font-weight:400;display:flex;gap:.4rem;align-items:center;margin:0">
-        <input type="radio" name="log_type" value="dns" style="width:auto"
-               {{ 'checked' if log_type == 'dns' }}> dns_log (โดเมน)
-      </label>
+  <form method="get" id="logform">
+    <input type="hidden" name="log_type" value="{{ params.log_type }}">
+    <div class="searchrow">
+      <input type="text" name="q" value="{{ params.q }}" autofocus autocomplete="off"
+             placeholder="เลขบัตร 13 หลัก · CAFE-xxxxx · MAC · IP · ชื่อเว็บ (เว้นว่าง = ทั้งหมด)">
+      <button type="submit" style="width:auto">ค้นหา</button>
     </div>
 
-    <div class="grid" style="grid-template-columns:1fr 1fr">
-      <div>
-        <label for="start">ช่วงเวลาเริ่มต้น</label>
-        <input type="datetime-local" id="start" name="start" value="{{ start }}" required>
-      </div>
-      <div>
-        <label for="end">ถึง</label>
-        <input type="datetime-local" id="end" name="end" value="{{ end }}" required>
-      </div>
+    <div class="ranges" role="radiogroup" aria-label="ช่วงเวลา">
+      {% for key, label in ranges.items() %}
+      <label><input type="radio" name="range" value="{{ key }}" {{ 'checked' if params.range == key }}
+                    onchange="{{ '' if key == 'custom' else 'this.form.submit()' }}"><span>{{ label }}</span></label>
+      {% endfor %}
+    </div>
+    <div id="custom" class="grid" style="grid-template-columns:1fr 1fr;{{ '' if params.range == 'custom' else 'display:none' }}">
+      <div><label for="start">ตั้งแต่</label>
+        <input type="datetime-local" id="start" name="start" value="{{ params.start }}"></div>
+      <div><label for="end">ถึง</label>
+        <input type="datetime-local" id="end" name="end" value="{{ params.end }}"></div>
     </div>
 
-    <label for="mac">MAC address (ไม่บังคับ)</label>
-    <input type="text" id="mac" name="mac" class="mono" value="{{ mac }}"
-           placeholder="AA:BB:CC:DD:EE:FF">
-
-    <label for="ip">IP address (ไม่บังคับ — ใช้กับ conn_log เท่านั้น)</label>
-    <input type="text" id="ip" name="ip" class="mono" value="{{ ip }}" placeholder="10.10.0.105">
-
-    <label for="domain">โดเมน (ไม่บังคับ — ใช้กับ dns_log เท่านั้น, ค้นแบบ contains)</label>
-    <input type="text" id="domain" name="domain" class="mono" value="{{ domain }}"
-           placeholder="example.com">
-
-    <p><button type="submit">ค้นหา</button></p>
+    <div style="display:flex;gap:1.25rem;flex-wrap:wrap;margin-top:.5rem">
+      <label style="font-weight:400;margin:0"><input type="checkbox" name="identified" value="1" style="width:auto"
+             {{ 'checked' if params.identified }}> เฉพาะที่ระบุตัวลูกค้าได้</label>
+      {% if params.log_type == 'dns' %}
+      <label style="font-weight:400;margin:0"><input type="checkbox" name="answers" value="1" style="width:auto"
+             {{ 'checked' if params.answers }}> แสดงคำตอบ DNS ด้วย</label>
+      {% endif %}
+    </div>
   </form>
+  <p class="hint">ทุกการค้นถูกบันทึกใน audit log (PDPA) · เลขบัตรแสดงแบบปิดบางหลักเท่านั้น ·
+    ค้นได้ครั้งละไม่เกิน 31 วัน</p>
 </div>
 
-{% if rows %}
+{% if searched %}
 <div class="card">
-  <h2>ผลการค้นหา (หน้า {{ page }}{{ ' — มีผลลัพธ์เพิ่มเติม' if has_next }})</h2>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5rem">
+    <h2 style="margin:0">ผลการค้นหา
+      <span class="hint">{{ start_dt.strftime('%d/%m %H:%M') }} – {{ end_dt.strftime('%d/%m %H:%M') }}
+        · หน้า {{ page }}{{ ' · มีต่อ' if has_next }}</span></h2>
+    {% if rows and current_role == 'admin' %}
+    <a class="btn ghost" style="background:transparent;border:1px solid var(--line);color:var(--ink)"
+       href="{{ url_for('search_logs', **dict(params, format='csv')) }}">ดาวน์โหลด CSV (สูงสุด 5,000 แถว)</a>
+    {% endif %}
+  </div>
+  {% if note %}<div class="msg warn">{{ note }}</div>{% endif %}
+
+  {% if not rows %}
+    <p class="hint" style="text-align:center;padding:1rem 0">ไม่พบรายการในช่วงเวลานี้</p>
+  {% else %}
   <div style="overflow-x:auto">
   <table>
-    {% if log_type == 'dns' %}
-    <tr><th>เวลา</th><th>ชนิด</th><th>IP ลูกค้า</th><th>MAC</th><th>โดเมน</th><th>ประเภท</th><th>คำตอบ</th>
-        <th>รหัสวอเชอร์</th><th>ลูกค้า</th></tr>
+    {% if params.log_type == 'dns' %}
+    <tr><th>เวลา</th><th>ลูกค้า</th><th>เครื่อง</th><th>เว็บ</th><th>ชนิด</th><th>คำตอบ</th></tr>
     {% for r in rows %}
     <tr>
-      <td>{{ r.ts.strftime('%d/%m/%Y %H:%M:%S') }}</td>
-      <td>{{ r.event_kind }}</td>
-      <td class="mono">{{ r.client_ip or '-' }}</td>
-      <td class="mono">{{ r.mac or '-' }}</td>
-      <td class="mono">{{ r.qname }}</td>
-      <td>{{ r.qtype or '-' }}</td>
-      <td class="mono">{{ r.answer or '-' }}</td>
-      <td class="mono">{{ r.voucher_username or 'ระบุตัวไม่แน่นอน' }}</td>
-      <td class="mono">{{ r.natid_masked or 'ระบุตัวไม่แน่นอน' }}</td>
+      <td>{{ r.ts.strftime('%d/%m %H:%M:%S') }}</td>
+      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
+          {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือเป็นคำตอบของ DNS">ยังไม่ระบุตัว</span>{% endif %}</td>
+      <td>{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
+      <td>{{ find(r.qname) }}</td>
+      <td>{{ r.qtype or ('คำตอบ' if r.event_kind == 'answer' else '-') }}</td>
+      <td>{% if r.answer %}{{ find(r.answer) }}{% else %}-{% endif %}</td>
     </tr>
     {% endfor %}
     {% else %}
-    <tr><th>เริ่ม</th><th>จบ</th><th>MAC</th><th>ต้นทาง</th><th>ปลายทาง</th><th>โปรโตคอล</th>
-        <th>bytes out</th><th>bytes in</th><th>รหัสวอเชอร์</th><th>ลูกค้า</th></tr>
+    <tr><th>เริ่ม</th><th>นาน</th><th>ลูกค้า</th><th>เครื่อง</th><th>ปลายทาง</th><th>ส่ง/รับ</th></tr>
     {% for r in rows %}
     <tr>
-      <td>{{ r.started_at.strftime('%d/%m/%Y %H:%M:%S') if r.started_at else '-' }}</td>
-      <td>{{ r.ts.strftime('%d/%m/%Y %H:%M:%S') }}</td>
-      <td class="mono">{{ r.mac or '-' }}</td>
-      <td class="mono">{{ r.src_ip }}:{{ r.src_port or '-' }}</td>
-      <td class="mono">{{ r.dst_ip }}:{{ r.dst_port or '-' }}</td>
-      <td>{{ r.proto }}</td>
-      <td>{{ r.bytes_out or 0 }}</td>
-      <td>{{ r.bytes_in or 0 }}</td>
-      <td class="mono">{{ r.voucher_username or 'ระบุตัวไม่แน่นอน' }}</td>
-      <td class="mono">{{ r.natid_masked or 'ระบุตัวไม่แน่นอน' }}</td>
+      <td>{{ (r.started_at or r.ts).strftime('%d/%m %H:%M:%S') }}</td>
+      <td>{% if r.started_at %}{% set sec = ((r.ts - r.started_at).total_seconds())|int %}
+          {{ (sec // 60) ~ ' นาที' if sec >= 60 else (sec ~ ' วิ') }}{% else %}-{% endif %}</td>
+      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
+          {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือจับคู่ได้ไม่แน่นอน">ยังไม่ระบุตัว</span>{% endif %}</td>
+      <td>{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
+      <td>{{ find(r.dst_ip) }}<span class="muted">:{{ r.dst_port or '-' }} {{ r.proto }}</span></td>
+      <td>{{ r.bytes_out|human_bytes }} / {{ r.bytes_in|human_bytes }}</td>
     </tr>
     {% endfor %}
     {% endif %}
   </table>
   </div>
+  {% endif %}
 
   <p style="margin-top:1rem;display:flex;gap:.5rem">
     {% if has_prev %}
     <a class="btn ghost" style="background:transparent;border:1px solid var(--line);color:var(--ink)"
-       href="{{ url_for('search_logs', log_type=log_type, start=start, end=end, mac=mac, ip=ip, domain=domain, page=page-1) }}">← ก่อนหน้า</a>
+       href="{{ url_for('search_logs', **dict(params, page=page-1)) }}">← ใหม่กว่า</a>
     {% endif %}
     {% if has_next %}
     <a class="btn ghost" style="background:transparent;border:1px solid var(--line);color:var(--ink)"
-       href="{{ url_for('search_logs', log_type=log_type, start=start, end=end, mac=mac, ip=ip, domain=domain, page=page+1) }}">ถัดไป →</a>
+       href="{{ url_for('search_logs', **dict(params, page=page+1)) }}">เก่ากว่า →</a>
     {% endif %}
   </p>
 </div>
-{% elif not error %}
-<div class="card"><p class="hint">ไม่พบผลลัพธ์ในเงื่อนไขที่ค้น</p></div>
 {% endif %}
+
+<script>
+  // "กำหนดเอง" = แสดงช่องวันเวลา (ไม่มี JS ก็ยังกดค้นหาได้ เพียงแต่ช่องจะไม่โผล่เอง)
+  document.querySelectorAll('input[name=range]').forEach(function (el) {
+    el.addEventListener('change', function () {
+      document.getElementById('custom').style.display = el.value === 'custom' ? '' : 'none';
+    });
+  });
+</script>
 {% endblock %}

@@ -893,76 +893,202 @@ LOGS_PAGE_SIZE = 50
 @app.get("/logs")
 @login_required
 def search_logs():
+    """ค้น log ย้อนหลัง -- ช่องค้นหาเดียวเดาชนิดให้เอง (เลขบัตร/CAFE-/MAC/IP/เว็บ) + ช่วงเวลาสำเร็จรูป
+
+    ยังบังคับช่วงเวลาเสมอเหมือนเดิม (ตาราง log โตเร็วตาม ม.26 ห้ามกวาดทั้งตาราง) แต่ค่าเริ่มต้นคือ
+    "วันนี้" -- เปิดหน้าครั้งแรกจึงไม่ค้นอะไร (ไม่ลง audit) แค่แสดงฟอร์มพร้อมใช้ แทน 400 แบบเดิม
+    """
     log_type = request.args.get("log_type", "conn")
     if log_type not in ("conn", "dns"):
         log_type = "conn"
+    q = (request.args.get("q") or "").strip()[:100]
+    rng = request.args.get("range", "today")
+    if rng not in LOG_RANGES:
+        rng = "today"
     start_raw = (request.args.get("start") or "").strip()
     end_raw = (request.args.get("end") or "").strip()
-    mac = (request.args.get("mac") or "").strip().upper()
-    domain = (request.args.get("domain") or "").strip()
-    ip = (request.args.get("ip") or "").strip()
+    identified_only = request.args.get("identified") == "1"
+    show_answers = request.args.get("answers") == "1"
+    want_csv = request.args.get("format") == "csv"
     try:
         page = max(1, int(request.args.get("page") or 1))
     except ValueError:
         page = 1
 
-    ctx = dict(log_type=log_type, start=start_raw, end=end_raw, mac=mac, domain=domain,
-              ip=ip, page=page, rows=[], has_next=False, has_prev=page > 1)
+    params = dict(log_type=log_type, q=q, range=rng, start=start_raw, end=end_raw,
+                  identified="1" if identified_only else "", answers="1" if show_answers else "")
+    ctx = dict(params=params, ranges=LOG_RANGES, rows=[], page=page, has_next=False,
+               has_prev=page > 1, searched=False, kind=None, note=None)
 
-    # บังคับกรอกช่วงเวลาเสมอ -- ห้ามค้นแบบไม่จำกัดช่วง (Pi 4B RAM จำกัด, ตารางโตเร็วตาม ม.26
-    # ที่บังคับเก็บ traffic log อย่างน้อย 90 วัน) query ไม่มี WHERE ts BETWEEN จะกวาดทั้งตาราง
-    if not start_raw or not end_raw:
-        return render_template("logs_search.html", error="ต้องระบุช่วงเวลาเริ่มต้นและสิ้นสุดเสมอ "
-                               "(ห้ามค้นแบบไม่จำกัดช่วง)", **ctx), 400
-    try:
-        start = datetime.fromisoformat(start_raw)
-        end = datetime.fromisoformat(end_raw)
-    except ValueError:
-        return render_template("logs_search.html", error="รูปแบบวันเวลาไม่ถูกต้อง", **ctx), 400
-    if end <= start:
-        return render_template("logs_search.html", error="วันที่สิ้นสุดต้องอยู่หลังวันที่เริ่มต้น",
-                               **ctx), 400
+    # เปิดหน้าครั้งแรก (ยังไม่กดค้นหา) -- แสดงฟอร์ม ไม่แตะ DB
+    if "range" not in request.args and not q:
+        return render_template("logs_search.html", error=None, **ctx)
 
-    offset = (page - 1) * LOGS_PAGE_SIZE
-    # ดึงเกิน 1 แถวเพื่อรู้ว่า "มีหน้าถัดไปไหม" โดยไม่ต้องรัน COUNT(*) แยกอีกคิวรี่ (คิวรี่นับแถว
-    # ทั้งชุดที่กรองแล้วก็หนักพอ ๆ กับคิวรี่ค้นเองบนตารางใหญ่ -- Pi 4B RAM จำกัด ไม่คุ้มที่จะรันซ้ำ)
+    start, end, error = _resolve_log_range(rng, start_raw, end_raw)
+    if error:
+        return render_template("logs_search.html", error=error, **ctx), 400
+    kind, value, error = _classify_log_query(q)
+    if error:
+        return render_template("logs_search.html", error=error, **ctx), 400
+    ctx.update(kind=kind, start_dt=start, end_dt=end)
+
+    where: list[str] = []
+    args: list = [start, end]
+    a = "dl" if log_type == "dns" else "cl"
+    if kind == "natid":
+        cust = query_one("SELECT id FROM customer WHERE natid_hash = %s", (value,))
+        if not cust:
+            ctx.update(searched=True, note="ไม่พบลูกค้าที่ใช้เลขบัตรนี้")
+            return render_template("logs_search.html", error=None, **ctx)
+        where.append("c.id = %s"); args.append(cust["id"])
+    elif kind == "voucher":
+        where.append("v.username = %s"); args.append(value)
+    elif kind == "mac":
+        where.append(f"{a}.mac = %s"); args.append(value)
+    elif kind == "ip":
+        if log_type == "dns":
+            where.append("(dl.client_ip = %s OR dl.answer = %s)")
+        else:
+            where.append("(cl.src_ip = %s OR cl.dst_ip = %s)")
+        args += [value, value]
+    elif kind == "domain":
+        if log_type == "dns":
+            where.append("dl.qname LIKE %s"); args.append(f"%{value}%")
+        else:
+            # "ใครเข้าเว็บนี้" ในตารางการเชื่อมต่อ: conn_log มีแต่ IP -- ใช้ IP ที่ DNS ตอบสำหรับโดเมนนี้
+            # ในช่วงเดียวกัน (ย้อน 1 ชม. เผื่อแคช DNS ของเครื่อง) · เป็นค่าประมาณ: หลายเว็บใช้ IP ร่วมกัน (CDN)
+            where.append("cl.dst_ip IN (SELECT d2.answer FROM dns_log d2 WHERE d2.qname LIKE %s "
+                         "AND d2.event_kind = 'answer' AND d2.ts BETWEEN %s AND %s)")
+            args += [f"%{value}%", start - timedelta(hours=1), end]
+            ctx["note"] = ("ค้นชื่อเว็บในตารางการเชื่อมต่อ = ประมาณจาก IP ที่ DNS ตอบสำหรับเว็บนั้น "
+                           "(เว็บที่ใช้ CDN ร่วมกันอาจติดมาด้วย)")
+    if identified_only:
+        where.append("v.id IS NOT NULL")
+    if log_type == "dns" and not show_answers:
+        where.append("dl.event_kind = 'query'")
+
     if log_type == "dns":
         sql = ("SELECT dl.ts, dl.client_ip, dl.mac, dl.qname, dl.qtype, dl.answer, dl.event_kind, "
-              "v.username AS voucher_username, c.natid_masked "
-              "FROM dns_log dl" + dns_mapping_join() +
-              " WHERE dl.ts BETWEEN %s AND %s")
-        params: list = [start, end]
-        if mac:
-            sql += " AND dl.mac = %s"; params.append(mac)
-        if domain:
-            sql += " AND dl.qname LIKE %s"; params.append(f"%{domain}%")
-        sql += " ORDER BY dl.ts DESC LIMIT %s OFFSET %s"
-        params += [LOGS_PAGE_SIZE + 1, offset]
+               "v.username AS voucher_username, c.natid_masked "
+               "FROM dns_log dl" + dns_mapping_join() + " WHERE dl.ts BETWEEN %s AND %s")
     else:
-        sql = ("SELECT cl.ts, cl.started_at, cl.mac, cl.src_ip, cl.src_port, cl.dst_ip, cl.dst_port, cl.proto, "
-              "cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked "
-              "FROM conn_log cl" + conn_mapping_join() +
-              " WHERE cl.ts BETWEEN %s AND %s")
-        params = [start, end]
-        if mac:
-            sql += " AND cl.mac = %s"; params.append(mac)
-        if ip:
-            sql += " AND (cl.src_ip = %s OR cl.dst_ip = %s)"; params += [ip, ip]
-        sql += " ORDER BY cl.ts DESC LIMIT %s OFFSET %s"
-        params += [LOGS_PAGE_SIZE + 1, offset]
+        sql = ("SELECT cl.ts, cl.started_at, cl.mac, cl.src_ip, cl.src_port, cl.dst_ip, cl.dst_port, "
+               "cl.proto, cl.bytes_out, cl.bytes_in, v.username AS voucher_username, c.natid_masked "
+               "FROM conn_log cl" + conn_mapping_join() + " WHERE cl.ts BETWEEN %s AND %s")
+    sql += "".join(f" AND {w}" for w in where) + f" ORDER BY {a}.ts DESC LIMIT %s OFFSET %s"
+
+    # audit ห้ามมีเลขบัตรเต็ม -- ลงแค่ชนิดที่ค้น (เลขบัตรแทนด้วย masked)
+    shown_q = crypto.mask_natid(re.sub(r"\D", "", q)) if kind == "natid" else (q or "-")
+    detail = (f"log_type={log_type} start={start.isoformat()} end={end.isoformat()} "
+              f"q={shown_q} kind={kind or '-'} identified={int(identified_only)} page={page}")
+
+    if want_csv:
+        if session.get("role") != "admin":
+            abort(403, "ดาวน์โหลด CSV ได้เฉพาะผู้ดูแลระบบ (admin)")
+        rows = query_all(sql, tuple(args + [LOGS_CSV_MAX, 0]))
+        audit.log_required(audit.EXPORT_LOG, staff_id=session["staff_id"], client_ip=g.client_ip,
+                           target="web-csv", detail=f"{detail} rows={len(rows)}")
+        return _logs_csv(log_type, rows)
 
     audit.log_required(audit.SEARCH_LOG, staff_id=session["staff_id"], client_ip=g.client_ip,
-                       detail=f"log_type={log_type} start={start.isoformat()} end={end.isoformat()} "
-                              f"mac={mac or '-'} domain={domain or '-'} ip={ip or '-'} page={page}")
-    rows = query_all(sql, tuple(params))
-    has_next = len(rows) > LOGS_PAGE_SIZE
-    rows = rows[:LOGS_PAGE_SIZE]
-    ctx.update(rows=rows, has_next=has_next)
-
-    # ลง audit_log ทุกครั้งที่ค้นสำเร็จ (PDPA + จุดขายตอนนำเสนอ) -- ไม่ลงตอนถูกปฏิเสธด้านบน
-    # เพราะยังไม่มีการค้นข้อมูลอะไรเกิดขึ้นจริง (ตรงกับแบบแผนเดิมของ /customers/<id>/erase
-    # ที่ไม่ลง audit ตอน validation ล้มเหลวเหมือนกัน)
+                       detail=detail)
+    rows = query_all(sql, tuple(args + [LOGS_PAGE_SIZE + 1, (page - 1) * LOGS_PAGE_SIZE]))
+    ctx.update(rows=rows[:LOGS_PAGE_SIZE], has_next=len(rows) > LOGS_PAGE_SIZE, searched=True)
     return render_template("logs_search.html", error=None, **ctx)
+
+
+LOGS_CSV_MAX = 5000
+LOG_MAX_SPAN = timedelta(days=31)
+LOG_RANGES = {"1h": "1 ชม.ล่าสุด", "today": "วันนี้", "yesterday": "เมื่อวาน",
+              "7d": "7 วันล่าสุด", "custom": "กำหนดเอง"}
+
+
+def _resolve_log_range(rng: str, start_raw: str, end_raw: str):
+    """คืน (start, end, error) -- ช่วงสำเร็จรูปคำนวณจากเวลาปัจจุบัน, กำหนดเองไม่เกิน 31 วัน"""
+    now = datetime.now().replace(microsecond=0)
+    midnight = now.replace(hour=0, minute=0, second=0)
+    if rng == "1h":
+        return now - timedelta(hours=1), now, None
+    if rng == "today":
+        return midnight, now, None
+    if rng == "yesterday":
+        return midnight - timedelta(days=1), midnight - timedelta(seconds=1), None
+    if rng == "7d":
+        return now - timedelta(days=7), now, None
+    if not start_raw or not end_raw:
+        return None, None, "เลือก 'กำหนดเอง' แล้วต้องระบุทั้งเวลาเริ่มต้นและสิ้นสุด"
+    try:
+        start, end = datetime.fromisoformat(start_raw), datetime.fromisoformat(end_raw)
+    except ValueError:
+        return None, None, "รูปแบบวันเวลาไม่ถูกต้อง"
+    if end <= start:
+        return None, None, "เวลาสิ้นสุดต้องอยู่หลังเวลาเริ่มต้น"
+    if end - start > LOG_MAX_SPAN:
+        return None, None, "ค้นได้ครั้งละไม่เกิน 31 วัน (กันเครื่องช้า) — แบ่งค้นเป็นช่วง"
+    return start, end, None
+
+
+_MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}([:-]?[0-9A-Fa-f]{2}){5}$")
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _classify_log_query(q: str):
+    """เดาว่าพิมพ์อะไรมา -- คืน (kind, value, error) · kind: natid/voucher/mac/ip/domain หรือ None"""
+    if not q:
+        return None, None, None
+    digits = re.sub(r"[\s-]", "", q)
+    if digits.isdigit() and len(digits) == 13:
+        if not crypto.valid_thai_id(digits):
+            return None, None, "เลขบัตรประชาชนไม่ถูกต้อง (ตรวจ checksum ไม่ผ่าน)"
+        return "natid", crypto.natid_hash(digits), None
+    if re.fullmatch(r"(?i)CAFE-[A-Z0-9]{5}", q):
+        return "voucher", q.upper(), None
+    if _MAC_RE.match(q):
+        hexes = re.sub(r"[:-]", "", q).upper()
+        return "mac", ":".join(hexes[i:i + 2] for i in range(0, 12, 2)), None
+    try:
+        return "ip", str(ipaddress.ip_address(q)), None
+    except ValueError:
+        pass
+    if _DOMAIN_RE.match(q) and any(ch.isalpha() for ch in q):
+        return "domain", q.lower(), None
+    return None, None, ("ไม่รู้จักรูปแบบนี้ — พิมพ์เลขบัตร 13 หลัก, เลขอ้างอิง CAFE-xxxxx, MAC, IP "
+                        "หรือชื่อเว็บ")
+
+
+def _logs_csv(log_type: str, rows):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if log_type == "dns":
+        w.writerow(["ts", "client_ip", "mac", "qname", "qtype", "answer", "event_kind",
+                    "voucher", "customer_masked"])
+        for r in rows:
+            w.writerow([r["ts"], r["client_ip"], r["mac"], r["qname"], r["qtype"], r["answer"],
+                        r["event_kind"], r["voucher_username"], r["natid_masked"]])
+    else:
+        w.writerow(["started_at", "ts", "mac", "src_ip", "src_port", "dst_ip", "dst_port", "proto",
+                    "bytes_out", "bytes_in", "voucher", "customer_masked"])
+        for r in rows:
+            w.writerow([r["started_at"], r["ts"], r["mac"], r["src_ip"], r["src_port"], r["dst_ip"],
+                        r["dst_port"], r["proto"], r["bytes_out"], r["bytes_in"],
+                        r["voucher_username"], r["natid_masked"]])
+    resp = app.make_response("﻿" + buf.getvalue())  # BOM ให้ Excel อ่านภาษาไทยถูก
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = (
+        f"attachment; filename={log_type}_log_{datetime.now():%Y%m%d-%H%M%S}.csv")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.template_filter("human_bytes")
+def human_bytes(n) -> str:
+    n = int(n or 0)
+    for unit, size in (("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
 
 
 # N2 (CODING_BRIEF.md): logger/integrity.py มี verify_chain() พร้อมใช้และมีเทสต์ผ่านแล้ว
