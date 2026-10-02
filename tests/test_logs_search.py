@@ -376,7 +376,21 @@ def test_values_in_results_link_to_new_search(client):
     _login_as(client, "admin")
     _conn(0)
     html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
-    assert "q=CAFE-8F3K2" in html and "q=93.184.216.34" in html
+    assert "q=Somchais-iPhone" in html and "q=93.184.216.34" in html
+
+
+def test_customer_cell_shows_device_name_instead_of_voucher_code(client):
+    """ใต้เลขบัตรแสดงชื่อเครื่องแทนเลขสิทธิ์ที่สุ่มมา -- session เก่าที่ไม่มีชื่อเครื่องถอยไปแสดงเลขสิทธิ์"""
+    _login_as(client, "admin")
+    _conn(0)
+    html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
+    assert "1-2345-XXXXX-XX-3<br>" in html and "q=CAFE-8F3K2" not in html
+    SESSIONS[0].update(hostname=None, os_label=None)
+    try:
+        html = client.get("/logs", query_string=AUG1).get_data(as_text=True)
+        assert "q=CAFE-8F3K2" in html
+    finally:
+        SESSIONS[0].update(hostname="Somchais-iPhone", os_label="iPhone · iOS 17.5")
 
 
 # ---------------------------------------------------------------- audit / สิทธิ์ / CSV

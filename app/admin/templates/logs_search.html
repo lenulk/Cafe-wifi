@@ -5,10 +5,15 @@
   <a class="mono" href="{{ url_for('search_logs', **dict(params, q=value, page=1)) }}">{{ label or value }}</a>
 {%- endmacro %}
 {% macro device(r) -%}
-  {# ชื่อเครื่อง/OS ที่เครื่องลูกค้าบอกเอง (ปลอมได้) -- แสดงประกอบ ไม่ใช่หลักฐาน #}
-  {%- if r.device_hostname or r.device_os -%}
-  <div title="เครื่องลูกค้าบอกเอง ใช้ประกอบเท่านั้น">{% if r.device_hostname %}{{ find(r.device_hostname) }}{% endif %}
-    {%- if r.device_os %}<span class="muted">{{ ' · ' if r.device_hostname }}{{ r.device_os }}</span>{% endif %}</div>
+  {# ใต้เลขบัตร: ชื่อเครื่องอ่านง่ายกว่าเลขสิทธิ์ CAFE-xxxxx ที่สุ่มมา -- session เก่าก่อนมีฟีเจอร์นี้
+     ไม่มีชื่อเครื่อง จึงถอยไปแสดงเลขสิทธิ์แทน (ค่าที่เครื่องบอกเอง ปลอมได้ ใช้ประกอบเท่านั้น) #}
+  {%- if r.device_hostname -%}
+    <span title="สิทธิ์ {{ r.voucher_username }}">{{ find(r.device_hostname) }}</span>
+    {%- if r.device_os %}<br><span class="muted">{{ r.device_os }}</span>{% endif %}
+  {%- elif r.device_os -%}
+    <span title="สิทธิ์ {{ r.voucher_username }}">{{ r.device_os }}</span>
+  {%- else -%}
+    {{ find(r.voucher_username) }}
   {%- endif -%}
 {%- endmacro %}
 {% block body %}
@@ -96,9 +101,9 @@
     {% for r in rows %}
     <tr>
       <td>{{ r.ts.strftime('%d/%m %H:%M:%S') }}</td>
-      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
+      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ device(r) }}
           {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือเป็นคำตอบของ DNS">ยังไม่ระบุตัว</span>{% endif %}</td>
-      <td>{{ device(r) }}{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
+      <td>{% if r.mac %}{{ find(r.mac) }}{% endif %}{% if r.client_ip %}<br>{{ find(r.client_ip) }}{% endif %}</td>
       <td>{{ find(r.qname) }}</td>
       <td>{{ r.qtype or ('คำตอบ' if r.event_kind == 'answer' else '-') }}</td>
       <td>{% if r.answer %}{{ find(r.answer) }}{% else %}-{% endif %}</td>
@@ -111,9 +116,9 @@
       <td>{{ (r.started_at or r.ts).strftime('%d/%m %H:%M:%S') }}</td>
       <td>{% if r.started_at %}{% set sec = ((r.ts - r.started_at).total_seconds())|int %}
           {{ (sec // 60) ~ ' นาที' if sec >= 60 else (sec ~ ' วิ') }}{% else %}-{% endif %}</td>
-      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ find(r.voucher_username) }}
+      <td>{% if r.natid_masked %}{{ r.natid_masked }}<br>{{ device(r) }}
           {% else %}<span class="muted" title="ก่อนลูกค้าได้รับอนุมัติ หรือจับคู่ได้ไม่แน่นอน">ยังไม่ระบุตัว</span>{% endif %}</td>
-      <td>{{ device(r) }}{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
+      <td>{% if r.mac %}{{ find(r.mac) }}<br>{% endif %}{{ find(r.src_ip) }}</td>
       <td>{{ find(r.dst_ip) }}<span class="muted">:{{ r.dst_port or '-' }} {{ r.proto }}</span></td>
       <td>{{ r.bytes_out|human_bytes }} / {{ r.bytes_in|human_bytes }}</td>
     </tr>
