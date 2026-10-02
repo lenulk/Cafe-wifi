@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}พนักงาน{% endblock %}
+{% block body %}
+<div class="card">
+  <h1>บัญชีพนักงาน</h1>
+  <p class="hint">
+    ให้พนักงานทุกคนมีบัญชีของตัวเอง ไม่ใช้บัญชีร่วมกัน — ระบบบันทึกว่าใครออกรหัส เปิดดูเลขบัตร
+    หรือค้น log (PDPA) · <strong>staff</strong> ออกรหัส/ยกเลิกรหัส/ค้น log ได้ ·
+    <strong>admin</strong> ทำได้ทุกอย่าง รวมถึงเปิดดูเลขบัตรเต็มและจัดการบัญชีในหน้านี้
+  </p>
+
+  <table>
+    <tr><th>ชื่อผู้ใช้</th><th>ชื่อที่แสดง</th><th>role</th><th>สถานะ</th><th>เข้าใช้ล่าสุด</th><th></th></tr>
+    {% for r in rows %}
+    <tr>
+      <td class="mono">{{ r.username }}{% if r.username == current_user %} <span class="hint">(คุณ)</span>{% endif %}</td>
+      <td>{{ r.display_name or '-' }}</td>
+      <td>{{ r.role }}</td>
+      <td>
+        {% if not r.is_active %}<span class="msg err" style="display:inline;padding:.1rem .4rem">ปิดใช้งาน</span>
+        {% elif r.must_change_password %}<span class="msg warn" style="display:inline;padding:.1rem .4rem">รอตั้งรหัสใหม่</span>
+        {% else %}ใช้งานได้{% endif %}
+      </td>
+      <td>{{ r.last_login_at.strftime('%d/%m/%y %H:%M') if r.last_login_at else '-' }}</td>
+      <td>
+        {% if r.username != current_user %}
+        <form method="post" action="{{ url_for('staff_toggle_active', sid=r.id) }}" style="display:inline"
+              onsubmit="return confirm('{{ 'เปิด' if not r.is_active else 'ปิด' }}บัญชี {{ r.username }} ใช่ไหม?')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="ghost" type="submit">{{ 'เปิดบัญชี' if not r.is_active else 'ปิดบัญชี' }}</button>
+        </form>
+        {% if r.is_active %}
+        <form method="post" action="{{ url_for('staff_reset_password', sid=r.id) }}" style="display:inline"
+              onsubmit="return confirm('รีเซ็ตรหัสของ {{ r.username }}? เครื่องที่ login ค้างไว้จะถูกออกจากระบบทันที')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="ghost" type="submit">รีเซ็ตรหัส</button>
+        </form>
+        <form method="post" action="{{ url_for('staff_set_role', sid=r.id) }}" style="display:inline"
+              onsubmit="return confirm('เปลี่ยน {{ r.username }} เป็น {{ 'staff' if r.role == 'admin' else 'admin' }} ใช่ไหม?')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="role" value="{{ 'staff' if r.role == 'admin' else 'admin' }}">
+          <button class="ghost" type="submit">ให้เป็น {{ 'staff' if r.role == 'admin' else 'admin' }}</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>เพิ่มพนักงาน</h2>
+  {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('staff_create') }}" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="username">ชื่อผู้ใช้</label>
+    <input type="text" id="username" name="username" required minlength="3" maxlength="64"
+           value="{{ username or '' }}" placeholder="เช่น somchai">
+    <div class="hint">a-z A-Z 0-9 . _ เท่านั้น</div>
+
+    <label for="display_name">ชื่อที่แสดง</label>
+    <input type="text" id="display_name" name="display_name" maxlength="128"
+           value="{{ display_name or '' }}" placeholder="เช่น สมชาย (กะเช้า)">
+
+    <label for="role">สิทธิ์</label>
+    <select id="role" name="role">
+      <option value="staff" selected>staff — ออกรหัสให้ลูกค้า</option>
+      <option value="admin">admin — ทำได้ทุกอย่าง</option>
+    </select>
+
+    <p><button type="submit">สร้างบัญชี</button></p>
+    <div class="hint">ระบบจะสุ่มรหัสชั่วคราวให้ แสดงครั้งเดียว · พนักงานต้องตั้งรหัสของตัวเองตอนเข้าใช้ครั้งแรก</div>
+  </form>
+</div>
+{% endblock %}

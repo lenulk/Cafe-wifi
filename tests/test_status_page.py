@@ -195,7 +195,7 @@ class FakeCursor:
         s = " ".join(sql.split()).lower()
         if s.startswith("select count(*) as n from staff"):
             self._rows = [{"n": len(STAFF)}]
-        elif s.startswith("select role, is_active from staff where id"):
+        elif s.startswith("select role, is_active"):
             self._rows = [r for r in STAFF if r["id"] == args[0]]
         elif s.startswith("select (select count(*) from portal_session"):
             self._rows = [{"active_sessions": 2, "conn_log_today": 7, "dns_log_today": 9,

@@ -10,5 +10,6 @@
 - [Aruba lab switch](aruba-lab-switch.md) — 2026-09-19 moved to Aruba CX 6100 + AP-515 for PoE; console/login facts, SSID must be Network-assigned (never VC-assigned/NAT)
 - [Lenilk fork](lenilk-fork.md) — collaborator's fork Lenilk/Cafe-wifi (≠ origin lenulk); round-2 review fixes land there first
 - [Single Pi, single cable](single-pi-single-cable-constraint.md) — design constraint: one Pi plugged into the café router by one LAN cable; never propose separate mgmt interface/VLAN; secure SSH/Admin via auth (SSH keys planned), IPv6 drop, WireGuard
+- [Customer self-registration decision](customer-self-registration-decision.md) — portal: full ID + consent → request code → staff approves in Admin → device authorized; passwords retired; full ID over HTTP = user-accepted risk
 - [Push only to own GitHub](push-only-to-own-github.md) — never push to anyone else's repo (e.g. Lenilk); only origin lenulk/Cafe-wifi
 - [Two-machine workflow](two-machine-workflow.md) — โน้ตบุ๊ก = ทดลองกับของจริง, เดสก์ท็อป = ทำเอกสารอย่างเดียว; หลักฐานไหลทางเดียวผ่าน git (memory/, docs/, ข้อมูลทดสอบ/) ส่วนไฟล์เล่มต้องหิ้วเอง

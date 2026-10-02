@@ -38,7 +38,9 @@ def main() -> int:
         print("รหัสผ่านไม่ตรงกัน")
         return 1
 
-    execute("UPDATE staff SET password_hash = %s, is_active = 1 WHERE id = %s",
+    # password_changed_at = NOW(): session ที่ login ค้างไว้ด้วยรหัสเก่าหลุดทันที (admin/app.py gate())
+    execute("UPDATE staff SET password_hash = %s, is_active = 1, must_change_password = 0, "
+            "password_changed_at = NOW() WHERE id = %s",
             (crypto.hash_password(pw1), row["id"]))
     print(f"รีเซ็ตรหัสผ่านของ '{username}' (role={row['role']}) เรียบร้อย")
     return 0

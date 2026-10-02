@@ -27,6 +27,13 @@ BYPASS_DETECTED = "bypass_detected"  # N10 (CODING_BRIEF.md) -- T17: ตรว�
 LOG_GAP = "log_gap"  # N31 -- เหตุการณ์จราจรบางส่วนถูกทิ้ง (ENOBUFS/DB ล่ม) หลักฐานช่วงนั้นไม่ครบ
 INTEGRITY_FAILED = "integrity_failed"  # N21 -- hash chain ของ log ไม่ตรง = หลักฐานถูกแก้ไขย้อนหลัง
 CSRF_REJECT = "csrf_reject"  # R2-09 -- POST ไม่มี/ผิด CSRF token = อาจมีหน้าอื่นพยายามสั่งงานแทนพนักงาน
+# หน้า /staff -- ใครสร้าง/ปิด/รีเซ็ตบัญชีใคร ต้องตรวจย้อนหลังได้ (บัญชีรายคนแทนบัญชีร่วม เพื่อ PDPA)
+STAFF_CREATE = "staff_create"
+STAFF_DISABLE = "staff_disable"
+STAFF_ENABLE = "staff_enable"
+STAFF_ROLE = "staff_role"
+STAFF_RESET_PASSWORD = "staff_reset_password"
+PASSWORD_CHANGE = "password_change"
 
 
 def log(action: str, staff_id: int | None = None, target: str = "",

@@ -25,7 +25,7 @@ class FakeCursor:
         s = " ".join(sql.split()).lower()
         if s.startswith("select count(*) as n from staff"):
             self._rows = [{"n": len(STAFF)}]
-        elif s.startswith("select role, is_active from staff where id"):
+        elif s.startswith("select role, is_active"):
             self._rows = [r for r in STAFF if r["id"] == args[0]]
         elif s.startswith("insert into staff"):
             STAFF.append({"id": len(STAFF) + 1, "username": args[0],

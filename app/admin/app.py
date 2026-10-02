@@ -158,6 +158,15 @@ def admin_required(view):
     return wrapper
 
 
+# ระหว่างถูกบังคับเปลี่ยนรหัส (รหัสชั่วคราว) เข้าได้แค่หน้าเหล่านี้
+PASSWORD_CHANGE_ALLOWED = {"change_password", "logout", "health", "static"}
+
+
+def _pw_stamp(value) -> str:
+    """ค่า staff.password_changed_at ในรูปที่เก็บลง session ได้ ("" = ยังไม่เคยเปลี่ยนผ่านหน้าเว็บ)"""
+    return str(value) if value else ""
+
+
 @app.before_request
 def gate():
     g.client_ip = client_ip()
@@ -165,11 +174,18 @@ def gate():
         return None
     # R2-L03: session เก็บ role ไว้ใน cookie แต่สิทธิ์จริงอาจเปลี่ยนระหว่างที่ login ค้างอยู่
     if "staff_id" in session:
-        staff = query_one("SELECT role, is_active FROM staff WHERE id = %s",
-                          (session["staff_id"],))
+        staff = query_one("SELECT role, is_active, must_change_password, password_changed_at "
+                          "FROM staff WHERE id = %s", (session["staff_id"],))
         if not staff or not staff["is_active"] or staff["role"] != session.get("role"):
             session.clear()
             return redirect(url_for("login"))
+        # เปลี่ยน/รีเซ็ตรหัสแล้ว session ที่ login ไว้ก่อนหน้า (เครื่องอื่น หรือคนที่รู้รหัสเก่า) หลุดทันที
+        if _pw_stamp(staff.get("password_changed_at")) != session.get("pw_at", ""):
+            session.clear()
+            return redirect(url_for("login"))
+        # รหัสชั่วคราวจาก /staff ใช้ได้แค่เพื่อตั้งรหัสใหม่เท่านั้น
+        if staff.get("must_change_password") and request.endpoint not in PASSWORD_CHANGE_ALLOWED:
+            return redirect(url_for("change_password"))
     # R2-09: SameSite=Lax อย่างเดียวไม่กันคำขอจากหน้าอื่นใน "site" เดียวกัน (host/IP เดียวกันคนละ port)
     # ตรวจ token ทุก POST รวม /login และ /setup ด้วย (กัน login CSRF -- ถูกจับ login เป็นบัญชีคนอื่น)
     if request.method == "POST" and app.config["CSRF_ENABLED"] and not csrf_ok():
@@ -297,7 +313,8 @@ def login():
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
     row = query_one(
-        "SELECT id, username, password_hash, display_name, role, is_active "
+        "SELECT id, username, password_hash, display_name, role, is_active, "
+        "must_change_password, password_changed_at "
         "FROM staff WHERE username = %s", (username,))
 
     if not row or not row["is_active"] or not crypto.verify_password(row["password_hash"], password):
@@ -312,9 +329,14 @@ def login():
 
     session.clear()
     session.permanent = True
-    session.update(staff_id=row["id"], username=row["username"], role=row["role"])
+    session.update(staff_id=row["id"], username=row["username"], role=row["role"],
+                   pw_at=_pw_stamp(row.get("password_changed_at")))
+    execute("UPDATE staff SET last_login_at = NOW() WHERE id = %s", (row["id"],))
     audit.log(audit.LOGIN_OK, staff_id=row["id"], target=username, client_ip=ip)
 
+    if row.get("must_change_password"):
+        flash("กรุณาตั้งรหัสผ่านใหม่ของคุณเองก่อนเริ่มใช้งาน (รหัสที่ได้รับเป็นรหัสชั่วคราว)", "warn")
+        return redirect(url_for("change_password"))
     return redirect(safe_next(request.args.get("next", "")) or url_for("dashboard"))
 
 
@@ -327,6 +349,184 @@ def logout():
               target=session.get("username", ""), client_ip=g.client_ip)
     session.clear()
     return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------- บัญชีพนักงาน
+# เดิมมีแค่บัญชี admin ตัวแรกจาก /setup ร้านจริงจะใช้บัญชีร่วมกันทุกคน แล้ว audit_log บอกไม่ได้ว่า
+# "ใคร" เปิดดูเลขบัตร/ออกรหัส (PDPA ต้องระบุตัวผู้เข้าถึงได้) -- admin สร้างบัญชีรายคนด้วยรหัสชั่วคราว
+# ที่ระบบสุ่มให้ (แสดงครั้งเดียว) และพนักงานต้องตั้งรหัสเองตอน login ครั้งแรก admin จึงไม่รู้รหัสจริง
+USERNAME_HINT = "ชื่อผู้ใช้ต้องยาว 3-64 ตัว ใช้ได้เฉพาะ a-z A-Z 0-9 . _"
+
+
+def _valid_username(username: str) -> bool:
+    return (3 <= len(username) <= 64 and username.isascii()
+            and username.replace("_", "").replace(".", "").isalnum())
+
+
+def _other_active_admins(cur, staff_id: int) -> int:
+    """จำนวน admin ที่ใช้งานได้นอกจากบัญชีนี้ -- ต้องเหลืออย่างน้อย 1 เสมอ ไม่งั้นไม่มีใครจัดการระบบได้
+    (เรียกใน transaction เดียวกับการแก้และล็อกแถวไว้ กัน admin 2 คนปิดกันเองพร้อมกัน)"""
+    cur.execute("SELECT id FROM staff WHERE role='admin' AND is_active=1 AND id<>%s FOR UPDATE",
+                (staff_id,))
+    return len(cur.fetchall())
+
+
+def _staff_page(**ctx):
+    rows = query_all("SELECT id, username, display_name, role, is_active, must_change_password, "
+                     "created_at, last_login_at FROM staff ORDER BY is_active DESC, username")
+    return render_template("staff.html", rows=rows, **ctx)
+
+
+def _show_temp_password(username: str, temp_pw: str, created: bool):
+    # render ตรงจาก POST ไม่ใช่ PRG ผ่าน flash -- flash เก็บใน cookie ที่แค่เซ็นไม่ได้เข้ารหัส รหัสชั่วคราว
+    # จะค้างอยู่ใน cookie แบบอ่านออก · no-store กันเบราว์เซอร์เก็บหน้านี้ไว้ใน cache
+    resp = app.make_response(render_template("staff_temp_password.html", username=username,
+                                             temp_password=temp_pw, created=created))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _load_staff(cur, sid: int) -> dict:
+    cur.execute("SELECT id, username, role, is_active FROM staff WHERE id = %s FOR UPDATE", (sid,))
+    row = cur.fetchone()
+    if not row:
+        abort(404, "ไม่พบบัญชีพนักงานนี้")
+    return row
+
+
+@app.get("/staff")
+@login_required
+@admin_required
+def staff_list():
+    return _staff_page()
+
+
+@app.post("/staff")
+@login_required
+@admin_required
+def staff_create():
+    username = (request.form.get("username") or "").strip()
+    display = (request.form.get("display_name") or "").strip()[:128] or username
+    role = request.form.get("role", "staff")
+    if role not in ("admin", "staff"):
+        abort(400, "role ไม่ถูกต้อง")
+    if not _valid_username(username):
+        return _staff_page(error=USERNAME_HINT, username=username, display_name=display), 400
+    temp_pw = crypto.gen_temp_staff_password()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM staff WHERE username = %s", (username,))
+        if cur.fetchone():
+            return _staff_page(error=f"มีชื่อผู้ใช้ '{username}' อยู่แล้ว",
+                               username=username, display_name=display), 409
+        cur.execute(
+            "INSERT INTO staff (username, password_hash, display_name, role, is_active, "
+            "must_change_password, password_changed_at) VALUES (%s, %s, %s, %s, 1, 1, NOW())",
+            (username, crypto.hash_password(temp_pw), display, role))
+        audit.log_required(audit.STAFF_CREATE, staff_id=session["staff_id"], target=username,
+                           client_ip=g.client_ip, detail=f"role={role}", cursor=cur)
+    return _show_temp_password(username, temp_pw, created=True)
+
+
+@app.post("/staff/<int:sid>/active")
+@login_required
+@admin_required
+def staff_toggle_active(sid: int):
+    if sid == session["staff_id"]:
+        abort(400, "ปิดบัญชีของตัวเองไม่ได้ — ให้ admin คนอื่นปิดให้")
+    with get_conn() as conn, conn.cursor() as cur:
+        row = _load_staff(cur, sid)
+        activate = not row["is_active"]
+        if not activate and row["role"] == "admin" and _other_active_admins(cur, sid) == 0:
+            abort(400, "ต้องเหลือ admin ที่ใช้งานได้อย่างน้อย 1 บัญชี")
+        cur.execute("UPDATE staff SET is_active = %s WHERE id = %s", (1 if activate else 0, sid))
+        audit.log_required(audit.STAFF_ENABLE if activate else audit.STAFF_DISABLE,
+                           staff_id=session["staff_id"], target=row["username"],
+                           client_ip=g.client_ip, cursor=cur)
+    # ปิดแล้ว gate() เตะ session ของบัญชีนั้นออกเองใน request ถัดไป (R2-L03)
+    flash(f"{'เปิด' if activate else 'ปิด'}บัญชี '{row['username']}' แล้ว", "success")
+    return redirect(url_for("staff_list"))
+
+
+@app.post("/staff/<int:sid>/role")
+@login_required
+@admin_required
+def staff_set_role(sid: int):
+    role = request.form.get("role", "")
+    if role not in ("admin", "staff"):
+        abort(400, "role ไม่ถูกต้อง")
+    if sid == session["staff_id"]:
+        abort(400, "เปลี่ยน role ของตัวเองไม่ได้ — ให้ admin คนอื่นเปลี่ยนให้")
+    with get_conn() as conn, conn.cursor() as cur:
+        row = _load_staff(cur, sid)
+        if row["role"] == role:
+            return redirect(url_for("staff_list"))
+        if row["role"] == "admin" and row["is_active"] and _other_active_admins(cur, sid) == 0:
+            abort(400, "ต้องเหลือ admin ที่ใช้งานได้อย่างน้อย 1 บัญชี")
+        cur.execute("UPDATE staff SET role = %s WHERE id = %s", (role, sid))
+        audit.log_required(audit.STAFF_ROLE, staff_id=session["staff_id"], target=row["username"],
+                           client_ip=g.client_ip, detail=f"{row['role']}->{role}", cursor=cur)
+    flash(f"เปลี่ยน '{row['username']}' เป็น {role} แล้ว", "success")
+    return redirect(url_for("staff_list"))
+
+
+@app.post("/staff/<int:sid>/reset-password")
+@login_required
+@admin_required
+def staff_reset_password(sid: int):
+    if sid == session["staff_id"]:
+        abort(400, "รีเซ็ตรหัสของตัวเองไม่ได้ — ใช้หน้า 'เปลี่ยนรหัสผ่าน'")
+    temp_pw = crypto.gen_temp_staff_password()
+    with get_conn() as conn, conn.cursor() as cur:
+        row = _load_staff(cur, sid)
+        # password_changed_at = NOW() -> session ของบัญชีนี้ทุกเครื่องหลุดทันที (gate())
+        cur.execute("UPDATE staff SET password_hash = %s, must_change_password = 1, "
+                    "password_changed_at = NOW() WHERE id = %s",
+                    (crypto.hash_password(temp_pw), sid))
+        audit.log_required(audit.STAFF_RESET_PASSWORD, staff_id=session["staff_id"],
+                           target=row["username"], client_ip=g.client_ip, cursor=cur)
+    return _show_temp_password(row["username"], temp_pw, created=False)
+
+
+@app.route("/account/password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    forced = bool((query_one("SELECT must_change_password FROM staff WHERE id = %s",
+                             (session["staff_id"],)) or {}).get("must_change_password"))
+    if request.method == "GET":
+        return render_template("account_password.html", forced=forced)
+
+    bucket = f"pwchange:{session['staff_id']}"
+    if rate_limited(bucket):
+        return render_template("account_password.html", forced=forced,
+                               errors=["ลองผิดหลายครั้งเกินไป รอ 10 นาทีแล้วลองใหม่"]), 429
+    current = request.form.get("current_password") or ""
+    pw1 = request.form.get("password") or ""
+    pw2 = request.form.get("password_confirm") or ""
+    row = query_one("SELECT password_hash FROM staff WHERE id = %s", (session["staff_id"],))
+    errors: list[str] = []
+    if not row or not crypto.verify_password(row["password_hash"], current):
+        record_attempt(bucket)
+        errors.append("รหัสผ่านปัจจุบันไม่ถูกต้อง")
+    if pw1 != pw2:
+        errors.append("รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน")
+    if pw1 and pw1 == current:
+        errors.append("รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสเดิม")
+    errors.extend(crypto.check_admin_password(pw1))
+    if errors:
+        return render_template("account_password.html", forced=forced, errors=errors), 400
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE staff SET password_hash = %s, must_change_password = 0, "
+                    "password_changed_at = NOW() WHERE id = %s",
+                    (crypto.hash_password(pw1), session["staff_id"]))
+        cur.execute("SELECT password_changed_at FROM staff WHERE id = %s", (session["staff_id"],))
+        stamp = (cur.fetchone() or {}).get("password_changed_at")
+        audit.log_required(audit.PASSWORD_CHANGE, staff_id=session["staff_id"],
+                           target=session.get("username", ""), client_ip=g.client_ip, cursor=cur)
+    # session นี้อยู่ต่อ ส่วน session อื่นของบัญชีเดียวกัน (ค่า stamp เก่า) หลุดใน request ถัดไป
+    session["pw_at"] = _pw_stamp(stamp)
+    flash("เปลี่ยนรหัสผ่านแล้ว อุปกรณ์อื่นที่ login บัญชีนี้ค้างไว้ถูกออกจากระบบแล้ว", "success")
+    return redirect(url_for("dashboard"))
 
 
 # ---------------------------------------------------------------- dashboard
@@ -459,8 +659,9 @@ def issue_result():
         cur.execute("UPDATE voucher_reveal SET consumed_at=NOW() WHERE token_hash=%s",
                     (token_hash,))
     session.pop("issue_token", None)
+    # QR/สลิปไม่มีเลขบัตรสักหลัก -- สลิปที่ลูกค้าลืมไว้บนโต๊ะต้องไม่เปิดเผยอะไรเพิ่ม ลูกค้ารู้เลขบัตรตัวเองอยู่แล้ว
     qr_text = (f"{os.environ.get('GATEWAY_NAME', 'Cafe-Guest')}\n"
-              f"User: {data['code']}\nPass: {data['password']}")
+              f"User: เลขบัตรประชาชน 4 ตัวท้าย\nPass: {data['password']}")
     quota_mb = data.get("quota_mb")
     quota_label = "ไม่จำกัด" if not quota_mb else (
         f"{quota_mb / 1000:g} GB" if quota_mb >= 1000 else f"{quota_mb} MB")

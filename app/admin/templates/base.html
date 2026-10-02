@@ -77,7 +77,8 @@
     <a href="{{ url_for('customers') }}">ลูกค้า</a>
     <a href="{{ url_for('search_logs') }}">ค้นหา log</a>
     <a href="{{ url_for('status_page') }}">สถานะระบบ</a>
-    <span class="hint">{{ current_user }} ({{ current_role }})</span>
+    {% if current_role == 'admin' %}<a href="{{ url_for('staff_list') }}">พนักงาน</a>{% endif %}
+    <a href="{{ url_for('change_password') }}" class="hint">{{ current_user }} ({{ current_role }}) · เปลี่ยนรหัสผ่าน</a>
     <form method="post" action="{{ url_for('logout') }}" style="display:inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="ghost" type="submit">ออกจากระบบ</button>

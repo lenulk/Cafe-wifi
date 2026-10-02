@@ -138,6 +138,19 @@ def gen_voucher_code(prefix: str = "CAFE") -> str:
     return f"{prefix}-{''.join(secrets.choice(_ALPHABET) for _ in range(5))}"
 
 
+def gen_temp_staff_password() -> str:
+    """รหัสชั่วคราวของพนักงาน (หน้า /staff) -- ผ่าน check_admin_password เสมอ และอ่านบอกกันได้
+
+    รูปแบบ xxxx-xxxx-xxxx (14 ตัว) จาก _ALPHABET ที่ไม่มีตัวกำกวม บังคับให้มีพิมพ์ใหญ่/เล็ก/ตัวเลขครบ
+    ใช้ได้ครั้งเดียว: login แล้วถูกบังคับเปลี่ยนทันที (staff.must_change_password)
+    """
+    while True:
+        pw = "-".join("".join(secrets.choice(_ALPHABET + _ALPHABET.lower()) for _ in range(4))
+                      for _ in range(3))
+        if not check_admin_password(pw):
+            return pw
+
+
 def check_admin_password(password: str) -> list[str]:
     """
     นโยบายรหัสผ่านผู้ดูแลระบบ คืน list ของปัญหา (ว่าง = ผ่าน)

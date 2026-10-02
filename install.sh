@@ -751,6 +751,16 @@ SQL
     die "ไม่พบ sql/008_pending_sessions_and_log_columns.sql — FAS และ cafe-logger ต้องใช้คอลัมน์ในไฟล์นี้"
   fi
 
+  # หน้า /staff (บัญชีพนักงานรายคน): บังคับเปลี่ยนรหัสชั่วคราว + เปลี่ยนรหัสแล้ว session เดิมหลุด
+  local staffpw="${SCRIPT_DIR}/sql/009_staff_password_lifecycle.sql"
+  if [[ -f "$staffpw" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${staffpw}'"
+    ok "อัปเดตสคีมาบัญชีพนักงานแล้ว"
+  else
+    die "ไม่พบ sql/009_staff_password_lifecycle.sql — Admin Panel ต้องใช้คอลัมน์ในไฟล์นี้"
+  fi
+
+
   # แก้บั๊ก (พบตอนตรวจทานรอบ 2): sql/003_partitions.sql มีอยู่ในโปรเจกต์และ Task Board
   # ติ๊กว่าเขียนแล้ว แต่ install.sh ไม่เคยเรียกใช้ไฟล์นี้เลยสักบรรทัด -- เป็น optional
   # ตามที่ comment ในไฟล์บอกไว้ (ไม่มีก็ทำงานถูกต้อง แค่ purge ช้ากว่าเมื่อข้อมูลเยอะมาก)

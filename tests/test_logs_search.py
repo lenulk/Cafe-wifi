@@ -83,7 +83,7 @@ class FakeCursor:
         s = _norm(sql)
         if s.startswith("select count(*) as n from staff"):
             self._rows = [{"n": len(STAFF)}]
-        elif s.startswith("select role, is_active from staff where id"):
+        elif s.startswith("select role, is_active"):
             self._rows = [r for r in STAFF if r["id"] == args[0]]
         elif s.startswith("insert into audit_log"):
             AUDIT.append(args)
