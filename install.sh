@@ -1902,11 +1902,21 @@ start_services() {
   step "เปิดใช้งาน service"
   if [[ "$INIT_SYS" != systemd ]]; then warn "ข้าม"; return 0; fi
   local s
-  for s in cafe-fas cafe-admin cafe-maintenance.timer cafe-enforce.timer; do
+  # แก้บั๊ก (พบตอนรันทับบน Pi จริง 2026-10-02): `enable --now` start เฉพาะ service ที่ยังไม่รัน --
+  # รัน install.sh ซ้ำเพื่ออัปเดตโค้ด gunicorn/logger ตัวเดิมจึงรันโค้ดเก่าในหน่วยความจำต่อ ขณะที่
+  # template บนดิสก์เป็นของใหม่แล้ว (หน้า Admin 500: 'csrf_token' is undefined) -- ต้อง restart
+  # service ที่รันโค้ดของเราเสมอ (ไม่แตะ opennds: restart = ลูกค้าที่ออนไลน์หลุดทั้งร้าน)
+  for s in cafe-fas cafe-admin; do
+    run systemctl enable "$s" 2>/dev/null || true
+    run systemctl restart "$s" 2>/dev/null || warn "เปิด ${s} ไม่สำเร็จ — ตรวจด้วย: systemctl status ${s}"
+  done
+  for s in cafe-maintenance.timer cafe-enforce.timer; do
     run systemctl enable --now "$s" 2>/dev/null || warn "เปิด ${s} ไม่สำเร็จ — ตรวจด้วย: systemctl status ${s}"
   done
   if (( ! SKIP_NETWORK )); then
-    run systemctl enable --now cafe-logger 2>/dev/null || warn "เปิด cafe-logger ไม่สำเร็จ"
+    # restart ปลอดภัย: R2-06 ให้ collector flush ของที่ค้างก่อนออก และ dns_collector อ่านต่อจากตำแหน่งเดิม
+    run systemctl enable cafe-logger 2>/dev/null || true
+    run systemctl restart cafe-logger 2>/dev/null || warn "เปิด cafe-logger ไม่สำเร็จ"
     # ไม่ปิด stderr แล้ว (เดิม 2>/dev/null ซ่อนเหตุผลจริงไว้ ทำให้ debug ไม่ได้เวลา enable ล้ม)
     run systemctl enable --now opennds || {
       warn "เปิด opennds ไม่สำเร็จในรอบแรก — daemon-reload ซ้ำแล้วลองใหม่อีกครั้ง"
