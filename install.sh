@@ -42,6 +42,7 @@ readonly STATE_FILE="${ETC_DIR}/install.state"
 NIC=""                          # อินเทอร์เฟซเดียว (เช่น eth0) -- ไม่มี WAN/LAN แยกกันอีกแล้ว
 UPLINK_CIDR="192.168.1.2/24"    # IP ของ Pi ฝั่งเราเตอร์ (ใช้ออกเน็ต + SSH เข้ามาดูแล)
 UPLINK_GW="192.168.1.1"         # IP ของเราเตอร์บ้าน (default route ของ Pi)
+HOST_DNS="1.1.1.1 8.8.8.8"      # DNS ที่ตัว Pi เองใช้ (chrony/apt/ทดสอบความเร็ว) -- ชุดเดียวกับ server= ของ dnsmasq
 TRUSTED_MACS=""                 # N36: MAC ของอุปกรณ์โครงสร้างพื้นฐาน (เช่น AP) คั่นด้วย comma
 CLIENT_CIDR="10.10.0.1/24"      # IP ของ Pi ฝั่งลูกค้า (เป็น gateway/DHCP/DNS ให้ลูกค้า)
 DHCP_START="10.10.0.100"
@@ -113,6 +114,41 @@ write_file() {
   return 0
 }
 
+# ---------- DNS ของตัว Pi เอง (พบตอนทดสอบสายเส้นเดียวจริง 2026-10-02) ----------
+# ${NIC} ถูกตั้ง IP เองแบบ static + ปลดจาก NetworkManager (N34) จึง**ไม่มีใครบอก Pi ว่า DNS คืออะไร**
+# ในแลปไม่เคยเห็นเพราะ wlan0 ได้ DNS จาก DHCP ของ Wi-Fi -- ปิด wlan0 (= สภาพร้านจริง สายเดียว)
+# แล้ว resolv.conf ว่างทันที: chrony หา time1.nimt.or.th/pool ไม่เจอหลังรีบูต (เวลาเพี้ยน = ผิด ม.26),
+# apt/หน้าสถานะ/ทดสอบความเร็วพังหมด ส่วนลูกค้าไม่กระทบเพราะ dnsmasq ส่งต่อไป server= ตรง ๆ
+configure_host_dns() {
+  [[ -z "$HOST_DNS" ]] && return 0
+  local ns body=""
+  for ns in $HOST_DNS; do body+="nameserver ${ns}"$'\n'; done
+  if [[ -L /etc/resolv.conf ]] && readlink /etc/resolv.conf | grep -q systemd; then
+    write_file "/etc/systemd/resolved.conf.d/99-${APP_NAME}.conf" 0644 <<RESOLVED
+# managed by ${APP_NAME} installer -- DNS ของตัว Pi (ไม่ใช่ของลูกค้า)
+[Resolve]
+DNS=${HOST_DNS}
+RESOLVED
+    run_sh "systemctl restart systemd-resolved 2>/dev/null || true"
+    ok "ตั้ง DNS ของ Pi ผ่าน systemd-resolved: ${HOST_DNS}"
+    return 0
+  fi
+  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    # ห้าม NetworkManager เขียนทับ resolv.conf (ไม่งั้นพอ Wi-Fi/อินเทอร์เฟซอื่นเปลี่ยนสถานะ ไฟล์จะว่างอีก)
+    write_file "/etc/NetworkManager/conf.d/99-${APP_NAME}-dns.conf" 0644 <<NMDNS
+# managed by ${APP_NAME} installer -- DNS ของ Pi ตั้งตายตัวใน /etc/resolv.conf
+[main]
+dns=none
+rc-manager=unmanaged
+NMDNS
+    run_sh "nmcli general reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null || true"
+  fi
+  (( DRY_RUN )) || rm -f /etc/resolv.conf  # อาจเป็น symlink ของระบบอื่น -- เขียนเป็นไฟล์จริงแทน
+  printf '# managed by %s installer -- DNS ของตัว Pi (ลูกค้าใช้ dnsmasq ที่ %s)\n%s' \
+    "$APP_NAME" "${CLIENT_CIDR%%/*}" "$body" | write_file /etc/resolv.conf 0644
+  ok "ตั้ง DNS ของ Pi: ${HOST_DNS} (ไม่พึ่ง DHCP/Wi-Fi)"
+}
+
 on_error() {
   local rc=$? line=${1:-?}
   err "ติดตั้งล้มเหลวที่บรรทัด ${line} (exit=${rc})"
@@ -132,6 +168,7 @@ Cafe Wi-Fi Gateway Installer
   --nic <iface>            อินเทอร์เฟซเดียวที่ต่อไปเราเตอร์บ้าน (เช่น eth0) -- โหมดสาย LAN เส้นเดียว
   --uplink-cidr <cidr>     IP/prefix ของ Pi ฝั่งเราเตอร์ (default 192.168.1.2/24)
   --uplink-gw <ip>         IP ของเราเตอร์บ้าน / default route (default 192.168.1.1)
+  --host-dns <a,b>         DNS ที่ตัว Pi เองใช้ (default 1.1.1.1,8.8.8.8) -- ไม่ใช่ DNS ของลูกค้า
   --client-cidr <cidr>     IP/prefix ของ Pi ฝั่งลูกค้า (default 10.10.0.1/24)
   --dhcp-range <a>,<b>    ช่วง DHCP ฝั่งลูกค้า (default 10.10.0.100,10.10.0.250)
   --ssid <name>           ชื่อที่แสดงบน captive portal (default Cafe-Guest)
@@ -161,6 +198,7 @@ parse_args() {
       --nic)             NIC="$2"; shift 2 ;;
       --uplink-cidr)     UPLINK_CIDR="$2"; shift 2 ;;
       --uplink-gw)       UPLINK_GW="$2"; shift 2 ;;
+      --host-dns)        HOST_DNS="${2//,/ }"; shift 2 ;;
       --trusted-mac)     TRUSTED_MACS="$2"; shift 2 ;;
       --client-cidr)     CLIENT_CIDR="$2"; shift 2 ;;
       --wan-if|--lan-if|--lan-cidr)
@@ -959,6 +997,8 @@ ensure_uplink_before_packages() {
   run_sh "ip link set '${NIC}' up 2>/dev/null || true"
   run_sh "ip addr add '${UPLINK_CIDR}' dev '${NIC}' 2>/dev/null || true"
   run_sh "ip route replace default via '${UPLINK_GW}' dev '${NIC}' 2>/dev/null || true"
+  # route ถูกแต่ resolve ชื่อไม่ได้ (สายเส้นเดียว ไม่มี Wi-Fi มาให้ DNS) ก็ยังโหลดแพ็กเกจไม่ได้เหมือนกัน
+  getent hosts pypi.org >/dev/null 2>&1 || configure_host_dns
   sleep 2
 
   if curl -fsS --max-time 10 -o /dev/null https://pypi.org 2>/dev/null; then
@@ -1027,6 +1067,7 @@ SYSCTL
   run_sh "ip addr add '${UPLINK_CIDR}' dev '${NIC}' 2>/dev/null || true"
   run_sh "ip link set '${NIC}' up 2>/dev/null || true"
   run_sh "ip route replace default via '${UPLINK_GW}' dev '${NIC}' 2>/dev/null || true"
+  configure_host_dns
 
   # *** Plan B ของ R11 (§3.1.6) — ตอนนี้ยืนยันแล้วว่าเป็น**ทางเดียวที่ใช้งานได้จริง** ***
   # ทดสอบบน VM lab (2026-08-27) พบว่า openNDS 10.1.3 ปฏิเสธ interface ที่มี IP มากกว่า 1
@@ -1071,6 +1112,11 @@ ip link add '${CLI_IFACE}' link '${NIC}' type macvlan mode bridge 2>/dev/null ||
 ip addr add '${CLIENT_CIDR}' dev '${CLI_IFACE}' 2>/dev/null || true
 ip link set '${CLI_IFACE}' up 2>/dev/null || true
 ip route replace default via '${UPLINK_GW}' dev '${NIC}' 2>/dev/null || true
+# กันเหนียว: ถ้า resolv.conf (ไฟล์จริง ไม่ใช่ symlink ของ systemd-resolved) ไม่มี nameserver เลย
+# ตัว Pi จะ resolve ชื่อไม่ได้ -- chrony หาเซิร์ฟเวอร์เวลาไม่เจอ (ม.26) ดู configure_host_dns() ใน install.sh
+if [ ! -L /etc/resolv.conf ] && ! grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+    for ns in ${HOST_DNS}; do echo "nameserver \$ns"; done > /etc/resolv.conf
+fi
 exit 0
 NETSETUP
   write_file "/etc/systemd/system/${APP_NAME}-netsetup.service" 0644 <<NETSVC

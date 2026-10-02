@@ -13,3 +13,4 @@
 - [Customer self-registration decision](customer-self-registration-decision.md) — portal: full ID + consent → request code → staff approves in Admin → device authorized; passwords retired; full ID over HTTP = user-accepted risk
 - [Push only to own GitHub](push-only-to-own-github.md) — never push to anyone else's repo (e.g. Lenilk); only origin lenulk/Cafe-wifi
 - [Two-machine workflow](two-machine-workflow.md) — โน้ตบุ๊ก = ทดลองกับของจริง, เดสก์ท็อป = ทำเอกสารอย่างเดียว; หลักฐานไหลทางเดียวผ่าน git (memory/, docs/, ข้อมูลทดสอบ/) ส่วนไฟล์เล่มต้องหิ้วเอง
+- ["pull" means push](user-says-pull-means-push.md) — "pullเลย" after a push offer = push to origin lenulk; fetch first
