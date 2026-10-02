@@ -134,6 +134,10 @@ class FakeCursor:
                             issued_by=staff, valid_from=vf, valid_until=vu, max_devices=dev,
                             quota_mb=quota, used_mb=0, status="active"))
             self.lastrowid = len(vou)
+        elif s.startswith("select id, username, max_devices, status, valid_until from voucher"):
+            self._rows = [v for v in vou if v["id"] == args[0]]
+        elif s.startswith("update voucher set max_devices"):
+            next(v for v in vou if v["id"] == args[1])["max_devices"] = args[0]
         elif s.startswith("select count(*) as n from device where voucher_id"):
             self._rows = [{"n": sum(d["voucher_id"] == args[0] for d in DB["device"])}]
         # ---- common/access.reserve_pending_session
@@ -490,6 +494,60 @@ def test_csrf_required_on_approve(fas, admin):
     _register(fas)
     assert _approve(admin).status_code == 400
     assert DB["access_request"][0]["status"] == "pending"
+
+
+def _full_voucher(fas, admin):
+    """ลูกค้ามีสิทธิ์ 1 เครื่องและใช้ไปแล้ว แล้วมาขอเครื่องที่ 2 (ภาพจากหน้าจอจริง 2 ต.ค.)"""
+    _register(fas, mac="AA:BB:CC:DD:EE:01")
+    _approve(admin, rid=1, devices="1")
+    DB["portal_session"][0]["state"] = "authenticated"
+    DB["device"].append(dict(voucher_id=1, mac="AA:BB:CC:DD:EE:01"))
+    DB["claims"].clear()
+    _register(fas, mac="AA:BB:CC:DD:EE:02")
+
+
+def test_full_voucher_shows_warning_and_device_editor(fas, admin):
+    _full_voucher(fas, admin)
+    html = admin.get("/requests").get_data(as_text=True)
+    assert "ใช้ 1/1 เครื่อง" in html and "ใช้ครบแล้ว" in html
+    assert 'action="/vouchers/1/devices"' in html
+    assert re.search(r'id="vdev-2"[^>]*value="2"', html, re.S), "ครบแล้ว = เสนอเพิ่มเป็น 2 ไว้ให้"
+
+
+def test_raise_device_limit_then_approve_second_device(fas, admin):
+    _full_voucher(fas, admin)
+    r = admin.post("/vouchers/1/devices", data=dict(devices="2", next="/requests"))
+    assert r.status_code == 302 and r.headers["Location"].endswith("/requests")
+    assert DB["voucher"][0]["max_devices"] == 2
+    assert "voucher_devices" in [a[1] for a in DB["audit"]]
+    _approve(admin, rid=2)
+    assert DB["access_request"][1]["status"] == "approved"
+    assert DB["portal_session"][1]["voucher_id"] == 1
+
+
+def test_device_limit_cannot_drop_below_bound_devices_or_out_of_range(fas, admin):
+    _full_voucher(fas, admin)
+    DB["voucher"][0]["max_devices"] = 3
+    DB["device"].append(dict(voucher_id=1, mac="AA:BB:CC:DD:EE:03"))
+    for bad in ("1", "0", "6", "abc"):
+        admin.post("/vouchers/1/devices", data=dict(devices=bad))
+        assert DB["voucher"][0]["max_devices"] == 3, bad
+    admin.post("/vouchers/1/devices", data=dict(devices="2"))
+    assert DB["voucher"][0]["max_devices"] == 2
+
+
+def test_device_edit_rejects_expired_voucher_and_unsafe_next(fas, admin):
+    _full_voucher(fas, admin)
+    DB["voucher"][0]["valid_until"] = datetime.now() - timedelta(minutes=1)
+    r = admin.post("/vouchers/1/devices", data=dict(devices="3", next="//evil.example/"))
+    assert DB["voucher"][0]["max_devices"] == 1
+    assert r.headers["Location"].endswith("/requests"), "ห้าม open redirect ผ่าน next"
+
+
+def test_register_page_has_show_hide_toggle(fas):
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    assert 'id="natid-toggle"' in html and 'type="button"' in html
+    assert 'type="password" id="natid"' in html, "ค่าเริ่มต้นต้องซ่อน"
 
 
 def test_old_issue_page_is_gone(admin):

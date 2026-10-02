@@ -11,9 +11,15 @@
 
   <label for="natid">เลขบัตรประชาชน 13 หลัก</label>
   {# type=password: กันคนข้าง ๆ มองเห็นเลขบนจอ · autocomplete=off: ไม่ให้เบราว์เซอร์จำเลขบัตรไว้ #}
-  <input type="password" id="natid" name="natid" required autofocus
-         inputmode="numeric" pattern="[0-9 -]{13,17}" maxlength="17" autocomplete="off"
-         placeholder="ตัวเลข 13 หลัก">
+  <div style="position:relative">
+    <input type="password" id="natid" name="natid" required autofocus
+           inputmode="numeric" pattern="[0-9 -]{13,17}" maxlength="17" autocomplete="off"
+           placeholder="ตัวเลข 13 หลัก" style="padding-right:4.5rem">
+    <button type="button" id="natid-toggle" aria-controls="natid" aria-pressed="false"
+            style="position:absolute;right:.35rem;top:50%;transform:translateY(-50%);width:auto;margin:0;
+                   padding:.3rem .7rem;font-size:.85rem;background:transparent;color:var(--accent);
+                   border:1px solid var(--line)">แสดง</button>
+  </div>
 
   <label style="display:flex;gap:.5rem;align-items:flex-start;font-weight:400">
     <input type="checkbox" name="consent" required style="margin-top:.2rem">
@@ -24,4 +30,17 @@
   <button type="submit">ขอใช้งาน</button>
 </form>
 <p class="hint">พนักงานจะตรวจบัตรประชาชนตัวจริงก่อนอนุมัติทุกครั้ง</p>
+<script>
+  // เปิดดูเลขที่พิมพ์ไว้เพื่อตรวจก่อนส่ง แล้วซ่อนกลับได้ (ค่าเริ่มต้นซ่อน กันคนข้าง ๆ มองเห็น)
+  (function () {
+    var input = document.getElementById('natid'), btn = document.getElementById('natid-toggle');
+    btn.addEventListener('click', function () {
+      var show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.textContent = show ? 'ซ่อน' : 'แสดง';
+      btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+      input.focus();
+    });
+  })();
+</script>
 {% endblock %}

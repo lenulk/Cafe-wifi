@@ -696,6 +696,43 @@ def approve_request(rid: int):
     return redirect(url_for("requests_page"))
 
 
+MAX_DEVICES_PER_VOUCHER = 5
+
+
+@app.post("/vouchers/<int:vid>/devices")
+@login_required
+def set_voucher_devices(vid: int):
+    """แก้จำนวนเครื่องของสิทธิ์ที่ยังใช้ได้ -- เช่น ลูกค้ามาขอเครื่องที่ 2 แต่สิทธิ์เดิมให้ไว้ 1 เครื่อง
+    ลดได้แต่ไม่ต่ำกว่าจำนวนเครื่องที่ผูกกับสิทธิ์นี้แล้ว (เครื่องที่ใช้อยู่ต้องไม่หลุดเพราะตัวเลขนี้)"""
+    back = safe_next(request.form.get("next", "")) or url_for("requests_page")
+    try:
+        n = int(request.form.get("devices", ""))
+    except ValueError:
+        n = 0
+    if not 1 <= n <= MAX_DEVICES_PER_VOUCHER:
+        flash(f"จำนวนเครื่องต้องอยู่ระหว่าง 1-{MAX_DEVICES_PER_VOUCHER}", "err")
+        return redirect(back)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, username, max_devices, status, valid_until FROM voucher "
+                    "WHERE id=%s FOR UPDATE", (vid,))
+        v = cur.fetchone()
+        if not v or v["status"] != "active" or v["valid_until"] <= datetime.now():
+            flash("สิทธิ์นี้หมดอายุหรือถูกยกเลิกแล้ว", "err")
+            return redirect(back)
+        cur.execute("SELECT COUNT(*) AS n FROM device WHERE voucher_id=%s", (vid,))
+        used = int((cur.fetchone() or {}).get("n") or 0)
+        if n < used:
+            flash(f"สิทธิ์นี้ผูกกับ {used} เครื่องแล้ว ลดต่ำกว่านั้นไม่ได้", "err")
+            return redirect(back)
+        if n == v["max_devices"]:
+            return redirect(back)
+        cur.execute("UPDATE voucher SET max_devices=%s WHERE id=%s", (n, vid))
+        audit.log_required(audit.VOUCHER_DEVICES, staff_id=session["staff_id"], target=v["username"],
+                           client_ip=g.client_ip, detail=f"{v['max_devices']}->{n}", cursor=cur)
+    flash(f"แก้จำนวนเครื่องของ {v['username']} เป็น {n} เครื่องแล้ว", "success")
+    return redirect(back)
+
+
 @app.post("/requests/<int:rid>/reject")
 @login_required
 def reject_request(rid: int):

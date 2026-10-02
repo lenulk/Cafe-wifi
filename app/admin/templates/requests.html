@@ -26,8 +26,19 @@
         {% if r.customer and r.customer.is_blocked %}
           <span class="badge err">ลูกค้าถูกระงับ</span>
         {% elif r.voucher %}
-          <span class="badge ok">มีสิทธิ์อยู่แล้ว ถึง {{ r.voucher.valid_until.strftime('%H:%M') }}
+          {% set full = r.devices_used >= r.voucher.max_devices %}
+          <span class="badge {{ 'err' if full else 'ok' }}">มีสิทธิ์อยู่แล้ว ถึง {{ r.voucher.valid_until.strftime('%H:%M') }}
             · ใช้ {{ r.devices_used }}/{{ r.voucher.max_devices }} เครื่อง</span>
+          <form method="post" action="{{ url_for('set_voucher_devices', vid=r.voucher.id) }}"
+                style="display:flex;gap:.4rem;align-items:center;margin-top:.4rem">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="next" value="{{ url_for('requests_page') }}">
+            <label for="vdev-{{ r.id }}" style="margin:0;font-weight:400">จำนวนเครื่อง</label>
+            <input type="number" id="vdev-{{ r.id }}" name="devices" min="{{ [r.devices_used, 1]|max }}" max="5"
+                   value="{{ r.voucher.max_devices + (1 if full else 0) }}" style="width:4.5rem">
+            <button class="ghost" type="submit">แก้จำนวนเครื่อง</button>
+          </form>
+          {% if full %}<div class="hint" style="color:var(--err)">ใช้ครบแล้ว — เพิ่มจำนวนเครื่องก่อน แล้วค่อยกดอนุมัติ</div>{% endif %}
         {% elif r.customer %}
           <span class="badge warn">ลูกค้าเก่า (มา {{ r.customer.visit_count }} ครั้ง)</span>
         {% else %}
