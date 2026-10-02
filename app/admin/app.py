@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from flask import (Flask, abort, flash, g, redirect, render_template,
                    request, session, url_for)
 
-from common import access, audit, crypto
+from common import access, audit, crypto, device_info
 from common.customer import PURGED_MARK, anonymize_customer, retention_hold_until
 from common.db import execute, get_conn, query_all, query_one
 from common.log_mapping import conn_mapping_join, dns_mapping_join
@@ -559,7 +559,55 @@ def dashboard():
     devices = _devices_by("id", [r["id"] for r in recent])
     for r in recent:
         r["devices"] = devices.get(r["id"], [])
-    return render_template("dashboard.html", stats=stats, recent=recent, now=datetime.now())
+    return render_template("dashboard.html", stats=stats, recent=recent, now=datetime.now(),
+                           net=_network_overview())
+
+
+def _network_overview() -> dict:
+    """อุปกรณ์บนเครือข่ายลูกค้าตอนนี้ แบ่งจาก lease ของ dnsmasq (= IP ที่แจกไปแล้ว):
+    identified = มี session ที่ได้รับสิทธิ์อยู่ · pending = มีคำขอรออนุมัติ · unknown = ต่อ Wi-Fi แต่ยังไม่ได้รับสิทธิ์"""
+    leases = device_info.read_leases()
+    pool = device_info.dhcp_pool_size()
+    online = {r["mac"]: r for r in query_all(
+        "SELECT ps.mac, ps.ip, ps.hostname, ps.os_label, c.natid_masked "
+        "FROM portal_session ps JOIN voucher v ON v.id = ps.voucher_id "
+        "LEFT JOIN customer c ON c.id = v.customer_id "
+        "WHERE ps.state = 'authenticated' AND ps.ended_at IS NULL")}
+    pending = {r["mac"]: r for r in query_all(
+        "SELECT mac, code, os_label FROM access_request WHERE status = 'pending' AND expires_at > NOW()")}
+    devices = []
+    seen = set()
+    for l in leases:
+        seen.add(l["mac"])
+        on, pe = online.get(l["mac"]), pending.get(l["mac"])
+        kind = "identified" if on else "pending" if pe else "unknown"
+        devices.append(dict(mac=l["mac"], ip=l["ip"], kind=kind,
+                            hostname=l["hostname"] or (on or {}).get("hostname"),
+                            os_label=(on or pe or {}).get("os_label"),
+                            natid_masked=(on or {}).get("natid_masked"), code=(pe or {}).get("code")))
+    for mac, on in online.items():  # ได้รับสิทธิ์แต่ไม่อยู่ใน lease (lease เพิ่งหมด/ตั้ง IP เอง) -- ยังนับ
+        if mac not in seen:
+            devices.append(dict(mac=mac, ip=on["ip"], kind="identified", hostname=on["hostname"],
+                                os_label=on["os_label"], natid_masked=on["natid_masked"], code=None))
+    # ยังไม่ระบุตัว: บอกว่าเครื่องนี้เคยใช้สิทธิ์ของใคร (คำใบ้เหมือนหน้าค้นหา log)
+    unknown = [d["mac"] for d in devices if d["kind"] == "unknown"]
+    if unknown:
+        for r in query_all(
+                "SELECT ps.mac, ps.hostname, ps.os_label, c.natid_masked FROM portal_session ps "
+                "JOIN voucher v ON v.id = ps.voucher_id LEFT JOIN customer c ON c.id = v.customer_id "
+                f"WHERE ps.mac IN ({', '.join(['%s'] * len(unknown))}) AND ps.authenticated_at IS NOT NULL "
+                "ORDER BY ps.authenticated_at DESC", tuple(unknown)):
+            d = next(d for d in devices if d["mac"] == r["mac"])
+            if "past_owner" not in d:
+                d["past_owner"] = r["natid_masked"]
+                d["hostname"] = d["hostname"] or r["hostname"]
+                d["os_label"] = d["os_label"] or r["os_label"]
+    order = {"identified": 0, "pending": 1, "unknown": 2}
+    devices.sort(key=lambda d: (order[d["kind"]], [int(x) for x in d["ip"].split(".")] if "." in d["ip"] else [0]))
+    counts = {k: sum(d["kind"] == k for d in devices) for k in order}
+    used = len(leases)
+    return dict(devices=devices, counts=counts, leased=used, pool=pool,
+                free=(max(pool - used, 0) if pool else None))
 
 
 def _devices_by(column: str, ids: list, per_key: int = 5) -> dict:

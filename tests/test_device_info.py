@@ -40,3 +40,22 @@ def test_lease_hostname(tmp_path):
     assert di.lease_hostname("4A:8D:3D:0E:D4:A1", "10.10.0.99", str(f)) is None, "IP ต้องตรงด้วย"
     assert di.lease_hostname("50:E4:E0:C4:0B:80", None, str(f)) is None, "'*' = เครื่องไม่ส่งชื่อมา"
     assert di.lease_hostname("AA:AA:AA:AA:AA:AA", None, str(tmp_path / "missing")) is None
+
+
+def test_read_leases_skips_expired_and_parses_names(tmp_path):
+    f = tmp_path / "leases"
+    f.write_text("0 aa:bb:cc:dd:ee:01 10.10.0.101 Forever-Phone *\n"
+                 "2000 aa:bb:cc:dd:ee:02 10.10.0.102 * *\n"
+                 "500 aa:bb:cc:dd:ee:03 10.10.0.103 Expired *\n"
+                 "junk line\n")
+    got = di.read_leases(str(f), now=1000)
+    assert [(l["mac"], l["ip"], l["hostname"]) for l in got] == [
+        ("AA:BB:CC:DD:EE:01", "10.10.0.101", "Forever-Phone"), ("AA:BB:CC:DD:EE:02", "10.10.0.102", None)]
+    assert di.read_leases(str(tmp_path / "missing")) == []
+
+
+def test_dhcp_pool_size(tmp_path):
+    f = tmp_path / "c.conf"
+    f.write_text("# x\ninterface=eth0\ndhcp-range=10.10.0.100,10.10.0.250,255.255.255.0,4h\n")
+    assert di.dhcp_pool_size(str(f)) == 151
+    assert di.dhcp_pool_size(str(tmp_path / "missing")) is None

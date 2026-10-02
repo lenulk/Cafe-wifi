@@ -11,6 +11,59 @@
 </div>
 
 <div class="card" style="margin-top:1rem">
+  <style>
+    .netbar{display:flex;height:28px;border-radius:8px;overflow:hidden;background:var(--line);margin:.75rem 0 .5rem}
+    .netbar span{display:block;height:100%}
+    .net-identified{background:var(--ok)} .net-pending{background:var(--warn)} .net-unknown{background:#8a8f98}
+    .netlegend{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;font-size:.95rem}
+    .netlegend i{display:inline-block;width:.8rem;height:.8rem;border-radius:3px;margin-right:.35rem;vertical-align:-1px}
+    .netlegend b{font-size:1.25rem;margin-right:.2rem}
+  </style>
+  {% set c = net.counts %}
+  {% set total = net.pool or net.leased or 1 %}
+  <h2 style="margin-bottom:.25rem">อุปกรณ์บนเครือข่ายตอนนี้</h2>
+  <p style="margin:0">แจก IP ไปแล้ว <b style="font-size:1.4rem">{{ net.leased }}</b>
+    {% if net.pool %}จาก {{ net.pool }} <span class="hint">(ว่าง {{ net.free }} · ใช้ไป {{ (net.leased * 100 / net.pool)|round(0)|int }}%)</span>{% endif %}</p>
+  <div class="netbar" role="img"
+       aria-label="ระบุตัวแล้ว {{ c.identified }}, รออนุมัติ {{ c.pending }}, ยังไม่ระบุตัว {{ c.unknown }}{% if net.pool %}, IP ว่าง {{ net.free }}{% endif %}">
+    {% for k in ('identified', 'pending', 'unknown') %}{% if c[k] %}
+    <span class="net-{{ k }}" style="width:{{ (c[k] * 100 / total)|round(2) }}%;min-width:6px"></span>
+    {% endif %}{% endfor %}
+  </div>
+  <div class="netlegend">
+    <span><i class="net-identified"></i><b>{{ c.identified }}</b> ระบุตัวแล้ว (ใช้เน็ตได้)</span>
+    <span><i class="net-pending"></i><b>{{ c.pending }}</b> รออนุมัติ</span>
+    <span><i class="net-unknown"></i><b>{{ c.unknown }}</b> ยังไม่ระบุตัว (ต่อ Wi-Fi แต่ยังไม่ได้รับสิทธิ์)</span>
+    {% if net.pool %}<span><i style="background:var(--line)"></i><b>{{ net.free }}</b> IP ว่าง</span>{% endif %}
+  </div>
+
+  {% if net.devices %}
+  <details style="margin-top:.75rem" {{ 'open' if net.devices|length <= 10 }}>
+    <summary style="cursor:pointer">ดูรายการเครื่อง ({{ net.devices|length }})</summary>
+    <div style="overflow-x:auto">
+    <table style="margin-top:.5rem">
+      <tr><th>สถานะ</th><th>เครื่อง</th><th>IP</th><th>ลูกค้า</th></tr>
+      {% for d in net.devices %}
+      <tr>
+        <td>{% if d.kind == 'identified' %}<span class="badge ok">ระบุตัวแล้ว</span>
+            {% elif d.kind == 'pending' %}<span class="badge warn">รออนุมัติ {{ d.code }}</span>
+            {% else %}<span class="badge" style="background:var(--line)">ยังไม่ระบุตัว</span>{% endif %}</td>
+        <td>{{ device_name(d) }}</td>
+        <td class="mono">{{ d.ip }}</td>
+        <td>{% if d.natid_masked %}<span class="mono">{{ d.natid_masked }}</span>
+            {% elif d.past_owner %}<span class="hint">เคยใช้สิทธิ์ของ {{ d.past_owner }}</span>
+            {% else %}<span class="hint">-</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+  </details>
+  {% else %}
+  <p class="hint">ยังไม่มีเครื่องต่อ Wi-Fi (หรืออ่านข้อมูล DHCP ไม่ได้)</p>
+  {% endif %}
+</div>
+
+<div class="card" style="margin-top:1rem">
   <h2>สิทธิ์ที่อนุมัติล่าสุด</h2>
   <div style="overflow-x:auto">
   <table>

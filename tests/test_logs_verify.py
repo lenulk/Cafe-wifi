@@ -47,6 +47,8 @@ class FakeCursor:
             self._rows = list(MANIFEST)
         elif s.startswith("select (select count(*) from voucher"):  # dashboard stats
             self._rows = [{"active_vouchers": 0, "customers": 0, "issued_today": 0, "online_now": 0}]
+        elif s.startswith(("select ps.mac, ps.ip, ps.hostname", "select mac, code, os_label from access_request")):
+            self._rows = []  # dashboard: อุปกรณ์บนเครือข่าย
         elif s.startswith("select v.id, v.username, v.issued_at"):  # dashboard recent vouchers
             self._rows = []
         elif s.startswith("insert into audit_log"):

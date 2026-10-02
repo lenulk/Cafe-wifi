@@ -183,6 +183,16 @@ class FakeCursor:
             self._rows = [dict(k=v[key], mac=x["mac"], hostname=x.get("hostname"),
                                os_label=x.get("os_label"), state=x["state"], ended_at=x.get("ended_at"))
                           for x in reversed(ps) for v in vou if v["id"] == x["voucher_id"] and v[key] in args]
+        # ---- dashboard: อุปกรณ์บนเครือข่าย
+        elif s.startswith("select ps.mac, ps.ip, ps.hostname, ps.os_label, c.natid_masked"):
+            self._rows = [dict(mac=x["mac"], ip=x["ip"], hostname=x.get("hostname"), os_label=x.get("os_label"),
+                               natid_masked=next(c["natid_masked"] for v in vou if v["id"] == x["voucher_id"]
+                                                 for c in cust if c["id"] == v["customer_id"]))
+                          for x in ps if x["state"] == "authenticated" and not x.get("ended_at")]
+        elif s.startswith("select mac, code, os_label from access_request"):
+            self._rows = [r for r in ar if _live_pending(r)]
+        elif s.startswith("select ps.mac, ps.hostname, ps.os_label, c.natid_masked from portal_session"):
+            self._rows = []  # เคยใช้สิทธิ์ของใคร -- เทสต์ชุดนี้ไม่มีประวัติ
         elif s.startswith("select v.id, v.username, v.issued_at"):
             self._rows = []
         else:
@@ -624,3 +634,27 @@ def test_dashboard_and_recent_requests_show_device_names(fas, admin):
     # แดชบอร์ด: ใช้ fake แบบย่อ -- เรียก helper ตรง ๆ ว่าจัดกลุ่ม/ออนไลน์ถูก
     devs = admin.application.view_functions["dashboard"].__globals__["_devices_by"]("id", [1])
     assert devs[1][0]["hostname"] == "Somchais-iPhone" and devs[1][0]["online"] is True
+
+
+# ================================================================ แดชบอร์ด: อุปกรณ์บนเครือข่าย
+def test_dashboard_network_overview_counts_and_lists_devices(fas, admin, tmp_path, monkeypatch):
+    from common import device_info
+    lease = tmp_path / "net.leases"
+    lease.write_text("0 aa:bb:cc:dd:ee:01 10.10.0.105 Somchais-iPhone *\n"     # ได้รับสิทธิ์
+                     "0 aa:bb:cc:dd:ee:02 10.10.0.106 * *\n"                     # รออนุมัติ
+                     "0 aa:bb:cc:dd:ee:03 10.10.0.107 DESKTOP-7KQ2L *\n"         # ยังไม่ระบุตัว
+                     "1000 aa:bb:cc:dd:ee:04 10.10.0.108 Old-Phone *\n")         # lease หมดอายุแล้ว
+    conf = tmp_path / "dnsmasq.conf"
+    conf.write_text("dhcp-range=10.10.0.100,10.10.0.250,255.255.255.0,4h\n")
+    monkeypatch.setattr(device_info, "LEASE_FILE", str(lease))
+    monkeypatch.setattr(device_info, "DNSMASQ_CONF", str(conf))
+    _register(fas)
+    _approve(admin)
+    DB["portal_session"][0]["state"] = "authenticated"
+    _register(fas, natid=NATID2, mac="AA:BB:CC:DD:EE:02")
+    html = admin.get("/").get_data(as_text=True)
+    assert "อุปกรณ์บนเครือข่ายตอนนี้" in html
+    assert re.search(r"แจก IP ไปแล้ว <b[^>]*>3</b>\s*จาก 151", html)
+    for n, label in ((1, "ระบุตัวแล้ว"), (1, "รออนุมัติ"), (1, "ยังไม่ระบุตัว"), (148, "IP ว่าง")):
+        assert re.search(rf"<b>{n}</b> {label}", html), label
+    assert "DESKTOP-7KQ2L" in html and "Old-Phone" not in html

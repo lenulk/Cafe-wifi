@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 
 LEASE_FILE = "/var/lib/misc/dnsmasq.leases"  # ชื่อตายตัว ดูเหตุผลใน install.sh (openNDS dhcp_check)
+DNSMASQ_CONF = "/etc/dnsmasq.d/cafe-wifi.conf"  # install.sh เขียน dhcp-range ไว้ที่นี่
 HOSTNAME_MAX = 63
 UA_MAX = 255
 
@@ -40,6 +41,42 @@ def lease_hostname(mac: str, ip: str | None = None, path: str | None = None) -> 
         parts = line.split()
         if len(parts) >= 4 and parts[1].lower() == mac and (ip is None or parts[2] == ip):
             return None if parts[3] == "*" else clean_hostname(parts[3])
+    return None
+
+
+def read_leases(path: str | None = None, now: float | None = None) -> list[dict]:
+    """lease ที่ยังไม่หมดอายุทั้งหมด -> [{mac (ตัวใหญ่), ip, hostname}] · อ่านไม่ได้ = [] (หน้าเว็บต้องไม่พัง)"""
+    import time
+    now = time.time() if now is None else now
+    try:
+        with open(path or LEASE_FILE, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        expiry = int(parts[0])
+        if expiry and expiry < now:  # 0 = lease ไม่มีวันหมดอายุ
+            continue
+        out.append(dict(mac=parts[1].upper(), ip=parts[2],
+                        hostname=None if parts[3] == "*" else clean_hostname(parts[3])))
+    return out
+
+
+def dhcp_pool_size(path: str | None = None) -> int | None:
+    """จำนวน IP ในช่วง dhcp-range ของ dnsmasq (เช่น 10.10.0.100-250 = 151) · หาไม่เจอ = None"""
+    import ipaddress
+    try:
+        with open(path or DNSMASQ_CONF, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.strip().startswith("dhcp-range="):
+                    a, b = line.split("=", 1)[1].split(",")[:2]
+                    return int(ipaddress.ip_address(b.strip())) - int(ipaddress.ip_address(a.strip())) + 1
+    except (OSError, ValueError):
+        pass
     return None
 
 
