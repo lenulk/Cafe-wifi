@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, abort, redirect, render_template, request
 
-from common import access, audit, crypto, device_info
+from common import access, audit, crypto, device_info, traffic
 from common.db import execute, get_conn, query_one
 from logger.netutil import resolve_mac
 from .opennds_proto import ClientContext, FasProtocolError, decrypt_fas_payload
@@ -283,7 +283,8 @@ def request_status():
                                message="เปิดหน้านี้จากเครื่องที่ต่อ Wi-Fi ของร้านเท่านั้น"), 400
     row = query_one(
         "SELECT ar.code, ar.status, ar.expires_at, ar.decision_note, ps.state AS session_state, "
-        "v.valid_until FROM access_request ar "
+        "ps.authenticated_at, ps.terminate_cause, v.id AS voucher_id, v.valid_until, v.quota_mb, "
+        "v.used_mb, v.status AS voucher_status FROM access_request ar "
         "LEFT JOIN portal_session ps ON ps.id = ar.portal_session_id "
         "LEFT JOIN voucher v ON v.id = ar.voucher_id "
         "WHERE ar.mac = %s AND ar.created_at > NOW() - INTERVAL 1 DAY "
@@ -294,10 +295,57 @@ def request_status():
     if state == "pending" and row["expires_at"] <= datetime.now():
         state = "expired"
     elif state == "approved":
-        state = {"authenticated": "online", "closed": "failed"}.get(row["session_state"], "opening")
-    resp = app.make_response(render_template("request_status.html", state=state, row=row))
+        # เครื่องหลุด (ไม่ได้ใช้งานนาน) แล้วกลับมาได้ session ใหม่ภายใต้สิทธิ์เดิม -- ต้องดู session ล่าสุดของ
+        # เครื่องนี้ในสิทธิ์นี้ ไม่ใช่ session แรกที่ผูกกับคำขอ (ไม่งั้นขึ้น "หมดเวลา" ทั้งที่ใช้เน็ตอยู่)
+        latest = query_one(
+            "SELECT state AS session_state, authenticated_at, terminate_cause FROM portal_session "
+            "WHERE mac=%s AND voucher_id=%s ORDER BY id DESC LIMIT 1", (mac, row["voucher_id"]))
+        if latest:
+            row.update(latest)
+        if row["session_state"] == "closed" and row["authenticated_at"]:
+            # เคยออนไลน์แล้วถูกปิด = หมดเวลา/โควตา/ถูกปิดสิทธิ์ ไม่ใช่ "เปิดไม่สำเร็จ" (บั๊กเดิม: ลูกค้า
+            # ที่ใช้ครบเวลาตามปกติเห็นข้อความว่าระบบเปิดเน็ตให้ไม่สำเร็จ)
+            state = "ended"
+        else:
+            state = {"authenticated": "online", "closed": "failed"}.get(row["session_state"], "opening")
+    usage = _voucher_usage(row) if state == "online" else None
+    resp = app.make_response(render_template("request_status.html", state=state, row=row,
+                                             usage=usage, now=datetime.now()))
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+def _voucher_usage(row) -> dict:
+    """เวลาและเน็ตที่เหลือของสิทธิ์นี้ (รวมทุกเครื่องที่ใช้สิทธิ์เดียวกัน) -- session ที่จบแล้วอยู่ใน
+    voucher.used_mb ส่วนที่ออนไลน์อยู่รวมสดจาก conn_log (นับเมื่อแต่ละการเชื่อมต่อจบ)"""
+    used = int(row["used_mb"] or 0) * traffic.BYTES_PER_MB
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT mac, authenticated_at FROM portal_session WHERE voucher_id=%s "
+                    "AND state='authenticated' AND ended_at IS NULL", (row["voucher_id"],))
+        live = cur.fetchall()
+    for s in live:
+        up, down = traffic.sum_session_traffic_bytes(query_one, s["mac"], s["authenticated_at"])
+        used += up + down
+    quota = int(row["quota_mb"]) * traffic.BYTES_PER_MB if row["quota_mb"] else None
+    left = max(int((row["valid_until"] - datetime.now()).total_seconds()), 0) if row["valid_until"] else None
+    return dict(used=used, quota=quota, seconds_left=left, devices=len(live),
+                pct=(min(100, round(used * 100 / quota)) if quota else None))
+
+
+@app.get("/")
+def home():
+    """http://cafe.wifi:8080 -- ลูกค้าที่ใช้เน็ตอยู่แล้วพิมพ์เข้ามาดูเวลา/เน็ตที่เหลือ (พอร์ต 80 ไม่ได้ --
+    openNDS ส่งทุกคำขอพอร์ต 80 ที่มาหา gateway ไปหน้าของตัวเองเสมอ)"""
+    return redirect("/request", code=302)
+
+
+@app.template_filter("human_bytes")
+def human_bytes(n) -> str:
+    n = int(n or 0)
+    for unit, size in (("GB", 1_000_000_000), ("MB", 1_000_000), ("KB", 1_000)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
 
 
 @app.get("/policy")

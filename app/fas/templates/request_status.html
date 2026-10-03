@@ -4,6 +4,7 @@
 {# หน้ารอ: รีเฟรชเองจนกว่าจะได้ผล -- ใช้ meta refresh ไม่พึ่ง JavaScript (หน้าต่าง captive portal
    ของบางระบบปฏิบัติการปิด JS หรือจำกัดไว้) #}
 {% if state in ("pending", "opening") %}<meta http-equiv="refresh" content="3">{% endif %}
+{% if state == "online" %}<meta http-equiv="refresh" content="60">{% endif %}
 {% endblock %}
 {% block body %}
 <h1>{{ gateway_name }}</h1>
@@ -19,10 +20,48 @@
   <p class="sub">อนุมัติแล้ว กำลังเปิดอินเทอร์เน็ตให้เครื่องนี้…</p>
 
 {% elif state == "online" %}
-  <div class="msg ok" style="text-align:center">
-    ใช้อินเทอร์เน็ตได้แล้ว{% if row.valid_until %} ถึง {{ row.valid_until.strftime('%H:%M') }} น.{% endif %}
+  <div class="msg ok" style="text-align:center">ใช้อินเทอร์เน็ตได้แล้ว</div>
+  {% if usage.seconds_left is not none %}
+  {% set h, m = usage.seconds_left // 3600, (usage.seconds_left % 3600) // 60 %}
+  <div style="text-align:center;margin:.75rem 0">
+    <div class="hint" style="margin:0">เวลาที่เหลือ</div>
+    <div style="font-size:2rem;font-weight:700;line-height:1.2">
+      {% if h %}{{ h }} ชม. {% endif %}{{ m }} นาที</div>
+    <div class="hint" style="margin:0">ใช้ได้ถึง {{ row.valid_until.strftime('%H:%M') }} น.</div>
   </div>
-  <p class="hint">ปิดหน้านี้แล้วใช้งานได้ตามปกติ</p>
+  {% endif %}
+  <div style="margin:.75rem 0">
+    <div style="display:flex;justify-content:space-between;font-size:.9rem">
+      <span>ใช้เน็ตไป <b>{{ usage.used|human_bytes }}</b></span>
+      <span class="hint" style="margin:0">{% if usage.quota %}จาก {{ usage.quota|human_bytes }}{% else %}ไม่จำกัด{% endif %}</span>
+    </div>
+    {% if usage.quota %}
+    <div style="height:10px;background:var(--line);border-radius:5px;overflow:hidden;margin-top:.3rem">
+      <div style="height:100%;width:{{ usage.pct }}%;background:{{ 'var(--err)' if usage.pct >= 90 else 'var(--warn)' if usage.pct >= 70 else 'var(--ok)' }}"></div>
+    </div>
+    <div class="hint" style="margin-top:.3rem;text-align:right">เหลือ {{ [usage.quota - usage.used, 0]|max|human_bytes }}</div>
+    {% endif %}
+  </div>
+  <p class="hint">ปิดหน้านี้แล้วใช้งานได้ตามปกติ · ดูอีกครั้งได้ที่ <b>http://cafe.wifi:8080</b><br>
+    นับรวมทุกเครื่องที่ใช้สิทธิ์เดียวกัน (ออนไลน์อยู่ {{ usage.devices }} เครื่อง) · ตัวเลขอัปเดตทุกนาที</p>
+
+{% elif state == "ended" %}
+  {% set still_valid = row.voucher_status == "active" and row.valid_until and row.valid_until > now %}
+  {% if row.terminate_cause == "quota_exceeded" or row.voucher_status == "used_up" %}
+    <div class="msg warn">ใช้เน็ตครบโควตาแล้ว</div>
+    <p class="hint">ต้องการใช้ต่อ แจ้งพนักงาน</p>
+  {% elif row.terminate_cause in ("voucher_revoked", "customer_blocked") %}
+    <div class="msg warn">สิทธิ์นี้ถูกปิดโดยพนักงาน</div>
+    <p class="hint">สอบถามพนักงาน</p>
+  {% elif still_valid %}
+    {# disconnected/reauth/gone: เครื่องหลุดเพราะไม่ได้ใช้งานนาน แต่สิทธิ์ยังเหลือ #}
+    <div class="msg warn">เครื่องนี้หลุดการเชื่อมต่อ (ไม่ได้ใช้งานนาน)</div>
+    <p class="hint">สิทธิ์ยังใช้ได้ถึง {{ row.valid_until.strftime('%H:%M') }} น. — เปิดเว็บใดก็ได้แล้วขอใช้งานอีกครั้ง
+      พนักงานจะอนุมัติเข้าสิทธิ์เดิม (เวลา/โควตาเดิม)</p>
+  {% else %}
+    <div class="msg warn">หมดเวลาใช้งานแล้ว</div>
+    <p class="hint">ต้องการใช้ต่อ แจ้งพนักงานเพื่อต่อเวลา หรือเปิดเว็บใดก็ได้เพื่อขอใช้งานใหม่</p>
+  {% endif %}
 
 {% elif state == "rejected" %}
   <div class="msg err">คำขอไม่ได้รับอนุมัติ{% if row.decision_note %}: {{ row.decision_note }}{% endif %}</div>

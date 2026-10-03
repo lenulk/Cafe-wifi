@@ -1621,6 +1621,9 @@ config opennds
 	list users_to_router 'allow udp port 67'
 	list users_to_router 'allow tcp port 22'
 	list users_to_router 'allow tcp port 443'
+	# หมายเหตุ: ไม่ต้องใส่พอร์ต 80 -- openNDS มีกฎ nat ตายตัว "ip daddr <gateway> tcp dport 80 redirect to
+	# :gatewayport" ส่งทุกคำขอพอร์ต 80 ไปหน้าของ openNDS เองเสมอ (พบบน Pi 2026-10-03) ลูกค้าดูเวลาที่เหลือ
+	# จึงใช้ http://cafe.wifi:${FAS_PORT} แทน (พอร์ต FAS ซึ่ง openNDS อนุญาตให้ทุกเครื่องอยู่แล้ว)
 	list users_to_router 'allow tcp port ${ADMIN_PORT}'
 
 	# walled garden: ต้องเปิดให้ OS ตรวจเจอ captive portal

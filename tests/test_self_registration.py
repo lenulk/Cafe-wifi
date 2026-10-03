@@ -94,7 +94,18 @@ class FakeCursor:
                 sess = next((x for x in ps if x["id"] == r["portal_session_id"]), None)
                 v = next((x for x in vou if x["id"] == r["voucher_id"]), None)
                 self._rows = [dict(r, session_state=sess and sess["state"],
-                                   valid_until=v and v["valid_until"])]
+                                   authenticated_at=sess and sess.get("authenticated_at"),
+                                   terminate_cause=sess and sess.get("terminate_cause"),
+                                   valid_until=v and v["valid_until"], quota_mb=v and v["quota_mb"],
+                                   used_mb=v and v["used_mb"], voucher_status=v and v["status"])]
+        elif s.startswith("select state as session_state, authenticated_at, terminate_cause from portal_session"):
+            mine = [x for x in ps if x["mac"] == args[0] and x["voucher_id"] == args[1]]
+            self._rows = [dict(session_state=x["state"], authenticated_at=x.get("authenticated_at"),
+                               terminate_cause=x.get("terminate_cause")) for x in mine[-1:]]
+        elif s.startswith("select mac, authenticated_at from portal_session where voucher_id"):
+            self._rows = [dict(mac=x["mac"], authenticated_at=x.get("authenticated_at") or x["started_at"])
+                          for x in ps if x["voucher_id"] == args[0] and x["state"] == "authenticated"
+                          and not x.get("ended_at")]
         elif s.startswith("select id, code, mac, hostname, os_label, natid_hash, natid_masked, created_at"):
             self._rows = [r for r in ar if _live_pending(r)]
         elif s.startswith("select ar.code, ar.natid_masked, ar.hostname, ar.os_label, ar.status"):
@@ -701,3 +712,60 @@ def test_portal_has_staff_login_button(fas):
     assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in html
     assert 'href="https://cafe.wifi:8443/login"' in html
     assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in fas.get("/login").get_data(as_text=True), "หน้าแนะนำ cafe.wifi ด้วย"
+
+
+
+# ================================================================ ลูกค้าดูเวลา/เน็ตที่เหลือ
+def _online(fas, admin, quota_mb=""):
+    _register(fas)
+    _approve(admin, hours="2", quota_mb=quota_mb)
+    sess = DB["portal_session"][0]
+    sess.update(state="authenticated", authenticated_at=_now())
+    return sess
+
+
+def test_online_page_shows_time_and_data_left(fas, admin):
+    _online(fas, admin, quota_mb="1000")
+    DB["voucher"][0]["used_mb"] = 300
+    DB["conn"] = [dict(mac="AA:BB:CC:DD:EE:01", out=10_000_000, **{"in": 390_000_000})]
+    html = fas.get("/request").get_data(as_text=True)
+    assert "เวลาที่เหลือ" in html and "1 ชม. 59 นาที" in html
+    assert "ใช้เน็ตไป <b>700.0 MB</b>" in html and "จาก 1.0 GB" in html, "300 MB ที่ปิดบัญชีแล้ว + 400 MB สด"
+    assert "เหลือ 300.0 MB" in html and "var(--warn)" in html, "70% = แถบเหลือง"
+    assert 'http-equiv="refresh" content="60"' in html
+
+
+def test_online_page_unlimited_quota(fas, admin):
+    _online(fas, admin)
+    html = fas.get("/request").get_data(as_text=True)
+    assert "ไม่จำกัด" in html and "เหลือ" in html
+
+
+def test_cafe_wifi_root_redirects_to_status(fas):
+    r = fas.get("/")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/request")
+
+
+@pytest.mark.parametrize("cause,expect", [
+    ("voucher_expired", "หมดเวลาใช้งานแล้ว"),
+    ("quota_exceeded", "ใช้เน็ตครบโควตาแล้ว"),
+    ("voucher_revoked", "ถูกปิดโดยพนักงาน"),
+    ("disconnected", "หลุดการเชื่อมต่อ"),
+])
+def test_ended_session_explains_why_instead_of_failed(fas, admin, cause, expect):
+    """บั๊กเดิม: ใช้ครบเวลาตามปกติแล้วขึ้น 'เปิดอินเทอร์เน็ตไม่สำเร็จ'"""
+    sess = _online(fas, admin)
+    sess.update(state="closed", ended_at=_now(), terminate_cause=cause)
+    if cause == "voucher_expired":
+        DB["voucher"][0]["valid_until"] = _now() - timedelta(minutes=1)
+    html = fas.get("/request").get_data(as_text=True)
+    assert expect in html and "ไม่สำเร็จ" not in html
+
+
+def test_reconnected_device_uses_latest_session(fas, admin):
+    """หลุดแล้วกลับมาได้ session ใหม่ในสิทธิ์เดิม -- ต้องขึ้นออนไลน์ ไม่ใช่ 'หลุด'"""
+    sess = _online(fas, admin)
+    sess.update(state="closed", ended_at=_now(), terminate_cause="reauth")
+    DB["portal_session"].append(dict(sess, id=2, state="authenticated", ended_at=None, terminate_cause=None))
+    html = fas.get("/request").get_data(as_text=True)
+    assert "เวลาที่เหลือ" in html and "หลุด" not in html
