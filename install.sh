@@ -44,6 +44,7 @@ readonly STATE_FILE="${ETC_DIR}/install.state"
 NIC=""                          # อินเทอร์เฟซเดียว (เช่น eth0) -- ไม่มี WAN/LAN แยกกันอีกแล้ว
 UPLINK_CIDR="192.168.1.2/24"    # IP ของ Pi ฝั่งเราเตอร์ (ใช้ออกเน็ต + SSH เข้ามาดูแล)
 UPLINK_GW="192.168.1.1"         # IP ของเราเตอร์บ้าน (default route ของ Pi)
+SSH_ALT_PORT=""                 # SSH จากวงลูกค้า (เดายาก, ใช้ key เท่านั้น) -- ว่าง = สุ่มครั้งแรกแล้วใช้ค่าเดิมตลอด
 HOST_DNS="1.1.1.1 8.8.8.8"      # DNS ที่ตัว Pi เองใช้ (chrony/apt/ทดสอบความเร็ว) -- ชุดเดียวกับ server= ของ dnsmasq
 TRUSTED_MACS=""                 # N36: MAC ของอุปกรณ์โครงสร้างพื้นฐาน (เช่น AP) คั่นด้วย comma
 CLIENT_CIDR="10.10.0.1/24"      # IP ของ Pi ฝั่งลูกค้า (เป็น gateway/DHCP/DNS ให้ลูกค้า)
@@ -151,6 +152,64 @@ NMDNS
   ok "ตั้ง DNS ของ Pi: ${HOST_DNS} (ไม่พึ่ง DHCP/Wi-Fi)"
 }
 
+# ---------- SSH จากวงลูกค้า (2026-10-03) ----------
+# ร้านจริงมีแค่เราเตอร์ + Pi: ช่างที่มาหน้าร้านต่อ Wi-Fi ร้านได้ IP วงลูกค้า เข้า SSH พอร์ต 22 ไม่ได้ (บล็อกไว้)
+# เปิดพอร์ตที่สุ่มไว้ให้แทน แต่**ใช้ SSH key เท่านั้น** (Match LocalPort) -- พอร์ตเดายากช่วยแค่ไม่ให้ถูกสแกนเจอง่าย
+# ไม่ได้กันการเดารหัส ถ้ายอมให้ใส่รหัสผ่านจากวงลูกค้า ใครในร้านก็ลองเดารหัส ras ได้ · พอร์ต 22 ทางเดิมไม่เปลี่ยน
+resolve_ssh_port() {
+  if [[ -z "$SSH_ALT_PORT" && -f "${ETC_DIR}/secrets.env" ]]; then
+    # || true: ครั้งแรกยังไม่มีบรรทัดนี้ grep คืน 1 แล้ว pipefail หยุดทั้งสคริปต์ (พบตอนรันบน Pi)
+    SSH_ALT_PORT="$(grep -E '^SSH_ALT_PORT=[0-9]+$' "${ETC_DIR}/secrets.env" | cut -d= -f2 || true)"
+  fi
+  if [[ -z "$SSH_ALT_PORT" ]]; then
+    local p
+    for _ in $(seq 1 50); do
+      p=$(( 20000 + $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 40000 ))
+      if ! ss -Htln "sport = :$p" 2>/dev/null | grep -q .; then SSH_ALT_PORT="$p"; break; fi
+    done
+  fi
+  [[ "$SSH_ALT_PORT" =~ ^[0-9]+$ ]] && (( SSH_ALT_PORT > 1024 && SSH_ALT_PORT < 65536 )) \
+    || die "--ssh-port ต้องเป็นตัวเลข 1025-65535"
+  for used in 22 80 443 53 67 "$ADMIN_PORT" "$FAS_PORT" "$NDS_PORT" "$ADMIN_BACKEND" "$FAS_BACKEND"; do
+    [[ "$SSH_ALT_PORT" == "$used" ]] && die "--ssh-port ${SSH_ALT_PORT} ชนกับพอร์ตของระบบ"
+  done
+  return 0
+}
+
+configure_ssh() {
+  step "SSH จากวงลูกค้า: พอร์ต ${SSH_ALT_PORT} (SSH key เท่านั้น)"
+  if [[ ! -d /etc/ssh/sshd_config.d ]] || ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null; then
+    warn "sshd_config ไม่ได้ Include sshd_config.d — ข้าม (ตั้ง SSH เองถ้าต้องการเข้าจากวงลูกค้า)"
+    return 0
+  fi
+  local conf="/etc/ssh/sshd_config.d/40-${APP_NAME}.conf"
+  # ชื่อขึ้นต้น 40 = อ่านก่อน 50-cloud-init.conf (sshd ใช้ค่าแรกที่เจอ) · Match ไว้ท้ายไฟล์เสมอ
+  write_file "$conf" 0644 <<SSHD
+# managed by ${APP_NAME} installer -- ดู configure_ssh() ใน install.sh
+# พอร์ต 22: ทางเดิม (วงเราเตอร์ / Wi-Fi ของ Pi) -- nftables บล็อกพอร์ต 22 จากวงลูกค้าอยู่แล้ว
+Port 22
+# พอร์ตสำหรับเข้าจากวงลูกค้า: ใช้ SSH key เท่านั้น ห้ามใช้รหัสผ่าน
+Port ${SSH_ALT_PORT}
+Match LocalPort ${SSH_ALT_PORT}
+	PasswordAuthentication no
+	KbdInteractiveAuthentication no
+	AuthenticationMethods publickey
+SSHD
+  (( DRY_RUN )) && return 0
+  local sshd_bin
+  sshd_bin="$(command -v sshd || echo /usr/sbin/sshd)"
+  if ! "$sshd_bin" -t 2>/tmp/${APP_NAME}-sshd-test.txt; then
+    warn "ค่า sshd ใหม่ไม่ผ่านการตรวจ — ถอนกลับ ไม่แตะ SSH: $(head -c 300 /tmp/${APP_NAME}-sshd-test.txt)"
+    rm -f "$conf"
+    return 0
+  fi
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    warn "เครื่องนี้ใช้ ssh.socket — พอร์ตใหม่ต้องตั้งใน ssh.socket ด้วย (ยังไม่รองรับอัตโนมัติ)"
+  fi
+  run_sh "systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true"
+  ok "SSH จากวงลูกค้า: ssh -p ${SSH_ALT_PORT} <user>@10.10.0.1 (ต้องมี SSH key ที่ลงไว้ใน ~/.ssh/authorized_keys)"
+}
+
 # ---------- สำรองข้อมูลลง USB (2026-10-03) ----------
 # backup รายวันเดิมอยู่บน SD card ใบเดียวกับฐานข้อมูล -- การ์ดเสีย (เรื่องปกติของ Pi) = ข้อมูลและ backup
 # หายพร้อมกัน log ย้อนหลังตาม ม.26 หายหมด · ให้ USB ที่ตั้งชื่อ (label) ${BACKUP_USB_LABEL} mount เองที่
@@ -194,6 +253,7 @@ Cafe Wi-Fi Gateway Installer
   --nic <iface>            อินเทอร์เฟซเดียวที่ต่อไปเราเตอร์บ้าน (เช่น eth0) -- โหมดสาย LAN เส้นเดียว
   --uplink-cidr <cidr>     IP/prefix ของ Pi ฝั่งเราเตอร์ (default 192.168.1.2/24)
   --uplink-gw <ip>         IP ของเราเตอร์บ้าน / default route (default 192.168.1.1)
+  --ssh-port <n>           พอร์ต SSH สำหรับเข้าจากวงลูกค้า (ใช้ SSH key เท่านั้น) -- ไม่ระบุ = สุ่มครั้งแรกแล้วใช้ค่าเดิม
   --host-dns <a,b>         DNS ที่ตัว Pi เองใช้ (default 1.1.1.1,8.8.8.8) -- ไม่ใช่ DNS ของลูกค้า
   --client-cidr <cidr>     IP/prefix ของ Pi ฝั่งลูกค้า (default 10.10.0.1/24)
   --dhcp-range <a>,<b>    ช่วง DHCP ฝั่งลูกค้า (default 10.10.0.100,10.10.0.250)
@@ -225,6 +285,7 @@ parse_args() {
       --uplink-cidr)     UPLINK_CIDR="$2"; shift 2 ;;
       --uplink-gw)       UPLINK_GW="$2"; shift 2 ;;
       --host-dns)        HOST_DNS="${2//,/ }"; shift 2 ;;
+      --ssh-port)        SSH_ALT_PORT="$2"; shift 2 ;;
       --trusted-mac)     TRUSTED_MACS="$2"; shift 2 ;;
       --client-cidr)     CLIENT_CIDR="$2"; shift 2 ;;
       --wan-if|--lan-if|--lan-cidr)
@@ -605,7 +666,8 @@ gen_secrets() {
               "UPLINK_NETWORK=$(cidr_to_network "$UPLINK_CIDR")" \
               "GATEWAY_IP=${CLIENT_CIDR%%/*}" "CLIENT_CIDR=${CLIENT_CIDR}" \
               "ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login" \
-              "OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}" "OFFSITE_REQUIRE_SEPARATE_DEVICE=1"; do
+              "OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}" "OFFSITE_REQUIRE_SEPARATE_DEVICE=1" \
+              "SSH_ALT_PORT=${SSH_ALT_PORT}"; do
       key="${kv%%=*}"
       if grep -q "^${key}=" "$secrets"; then
         sed -i "s|^${key}=.*|${kv}|" "$secrets"
@@ -672,6 +734,8 @@ BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS}
 # แค่หน้าสถานะเตือน · REQUIRE_SEPARATE_DEVICE กันกรณีไม่ได้เสียบแล้วไฟล์ไปลง SD ใบเดิมเงียบ ๆ
 OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}
 OFFSITE_REQUIRE_SEPARATE_DEVICE=1
+# SSH จากวงลูกค้า (configure_ssh) -- หน้าสถานะระบบแสดงให้ admin
+SSH_ALT_PORT=${SSH_ALT_PORT}
 SECRETS
 
   write_file "${ETC_DIR}/setup.token" 0640 "root:${APP_USER}" <<TOKEN
@@ -1309,12 +1373,16 @@ table inet filter {
     # และต่อชื่อผู้ใช้ (admin/app.py) + audit ทุกครั้งที่ login ไม่ผ่าน · ลูกค้าเปิด https://cafe.wifi:8443 เห็น
     # หน้า login ได้ (ความเสี่ยงที่ยอมรับ)
     ip saddr \$CLIENT_NET tcp dport ${ADMIN_PORT} accept
-    # SSH ยังห้ามจากฝั่งลูกค้าเสมอ (ดูแลเครื่องผ่านหน้าแอดมิน หรือเสียบจอ/คีย์บอร์ดที่ Pi)
+    # SSH จากวงลูกค้า: เฉพาะพอร์ตที่สุ่มไว้ (configure_ssh -- sshd บังคับ SSH key บนพอร์ตนี้) + จำกัดการเชื่อมต่อใหม่
+    # กันสแกน/เดาถี่ ๆ · พอร์ต 22 จากวงลูกค้ายังห้ามเหมือนเดิม
+    ip saddr \$CLIENT_NET tcp dport ${SSH_ALT_PORT} ct state new limit rate 6/minute burst 6 packets accept
+    ip saddr \$CLIENT_NET tcp dport ${SSH_ALT_PORT} drop
     ip saddr \$CLIENT_NET tcp dport 22 drop
 
     # จากฝั่งเราเตอร์/อัพลิงก์ (คนละ source กับ CLIENT_NET) อนุญาต SSH + Admin ตามปกติ
     tcp dport ${ADMIN_PORT} accept
     tcp dport 22 accept
+    tcp dport ${SSH_ALT_PORT} accept
   }
 
   chain forward {
@@ -1643,6 +1711,7 @@ config opennds
 	# :gatewayport" ส่งทุกคำขอพอร์ต 80 ไปหน้าของ openNDS เองเสมอ (พบบน Pi 2026-10-03) ลูกค้าดูเวลาที่เหลือ
 	# จึงใช้ http://cafe.wifi:${FAS_PORT} แทน (พอร์ต FAS ซึ่ง openNDS อนุญาตให้ทุกเครื่องอยู่แล้ว)
 	list users_to_router 'allow tcp port ${ADMIN_PORT}'
+	list users_to_router 'allow tcp port ${SSH_ALT_PORT}'
 
 	# walled garden: ต้องเปิดให้ OS ตรวจเจอ captive portal
 	list walledgarden_fqdn_list 'captive.apple.com'
@@ -2134,6 +2203,8 @@ final_summary() {
   printf '  %sหน้า /setup จะปิดตัวเองถาวรทันทีที่สร้างบัญชีแรกสำเร็จ%s\n' "$C_DIM" "$C_RST"
   printf '  %sและไฟล์ %s/setup.token จะถูกลบอัตโนมัติ%s\n\n' "$C_DIM" "$ETC_DIR" "$C_RST"
 
+  printf '  SSH จากวงลูกค้า (ช่างที่ต่อ Wi-Fi ร้าน): %sssh -p %s <user>@10.10.0.1%s  — ใช้ SSH key เท่านั้น\n\n' \
+    "$C_BLU" "$SSH_ALT_PORT" "$C_RST"
   printf '  ------------------------------------------------------------\n'
   printf '  ไฟล์สำคัญ\n'
   printf '    โปรแกรม         : %s\n' "$OPT_DIR"
@@ -2215,6 +2286,7 @@ main() {
   create_user_and_dirs
   ensure_uplink_before_packages   # N37: ย้ายเครื่องมาเครือข่ายใหม่แล้วรันซ้ำต้องไม่ค้างที่ apt/pip
   install_packages
+  resolve_ssh_port
   gen_secrets
   setup_python
   install_app_files
@@ -2222,6 +2294,7 @@ main() {
   configure_time
   configure_backup_usb
   configure_network
+  configure_ssh
   build_opennds
   install_services
   configure_nginx

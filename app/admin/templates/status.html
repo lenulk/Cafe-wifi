@@ -111,6 +111,14 @@
 })();
 </script>
 
+{% if current_role == 'admin' and ssh_port %}
+<div class="card">
+  <h2>เข้าเครื่องสำหรับช่าง (SSH)</h2>
+  <p>จาก Wi-Fi ร้าน: <code class="mono">ssh -p {{ ssh_port }} ras@10.10.0.1</code></p>
+  <p class="hint">ใช้ได้เฉพาะเครื่องที่ลง SSH key ไว้แล้ว (ใส่รหัสผ่านไม่ได้) · พอร์ตนี้แสดงเฉพาะผู้ดูแลระบบ อย่าแจ้งลูกค้า</p>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>สำรองข้อมูล</h2>
   {% if not backup.at %}

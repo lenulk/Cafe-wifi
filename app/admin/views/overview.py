@@ -31,7 +31,8 @@ def status_page():
     backup = backup_db.read_status(backup_db.status_path()) or {}
     backup["usb_present"] = os.path.exists("/dev/disk/by-label/CAFEBACKUP")
     return render_template("status.html", res=sysinfo.resources(), inet=sysinfo.internet_status(),
-                           speed=sysinfo.last_speed_test(), backup=backup, **data)
+                           speed=sysinfo.last_speed_test(), backup=backup,
+                           ssh_port=os.environ.get("SSH_ALT_PORT", ""), **data)
 
 
 @routes.get("/status/live")

@@ -322,3 +322,14 @@ def test_status_live_and_speedtest_endpoints(client):
     assert live["res"]["cpu"] == 12.5 and live["inet"]["online"] is True
     r = client.post("/status/speedtest")
     assert r.status_code == 200 and r.get_json()["down_mbps"] == 187.3
+
+
+def test_status_page_shows_technician_ssh_port_to_admin_only(client, monkeypatch):
+    monkeypatch.setenv("SSH_ALT_PORT", "41873")
+    _login(client)  # ผู้ใช้ในไฟล์นี้เป็น staff
+    assert "41873" not in client.get("/status").get_data(as_text=True), "พนักงานทั่วไปไม่เห็นพอร์ต"
+    monkeypatch.setitem(STAFF[0], "role", "admin")
+    with client.session_transaction() as sess:
+        sess["role"] = "admin"
+    html = client.get("/status").get_data(as_text=True)
+    assert "ssh -p 41873 ras@10.10.0.1" in html and "SSH key" in html
