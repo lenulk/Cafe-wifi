@@ -66,6 +66,7 @@ class EnforceSummary:
     deauth_ok: int = 0
     deauth_failed: int = 0
     sessions_gone: int = 0   # N30: ปิดเพราะ openNDS ไม่มีเครื่องนั้นแล้ว (ลูกค้าไปแล้ว/auth ไม่สำเร็จ)
+    orphans_deauthed: int = 0  # N44: openNDS ปล่อยออนไลน์แต่ไม่มีสิทธิ์ในฐานข้อมูล -> ตัด
 
 
 def expire_stale_vouchers(execute_fn) -> int:
@@ -228,6 +229,29 @@ def authenticated_macs(ndsctl_bin: str = "ndsctl") -> set[str] | None:
             if str(c.get("state", "")).lower().startswith("auth")}
 
 
+def find_orphan_macs(query_all_fn, macs: set[str]) -> list[str]:
+    """
+    N44 (พบบน Pi จริง 2026-10-03): เครื่องที่ openNDS ให้ใช้เน็ต (Authenticated) แต่**ไม่มี session ที่เปิดอยู่
+    ในฐานข้อมูล** -- ตรวจย้อนทางกับ find_sessions_gone (ฐานข้อมูล -> openNDS)
+
+    ต้นเหตุจริง: openNDS จำเครื่องที่เคย auth ไว้ใน /tmp/ndslog/authlog.log แล้วพอรีสตาร์ท (ติดตั้งทับ/รีบูต/
+    service ล่ม) มันสั่ง `ndsctl auth` คืนสิทธิ์ให้เองทุกเครื่อง (binauthlog: shutdown_deauth ตามด้วย
+    ndsctl_auth) โดยไม่รู้จักฐานข้อมูลของเรา -- เครื่องที่ถูกปิดสิทธิ์/หมดเวลาไปแล้ว (เช่น ASUS ที่ถูก revoke
+    เมื่อวาน) กลับมาใช้เน็ตฟรีได้อีก และ log ช่วงนั้นโยงหาตัวลูกค้าไม่ได้ (ผิด ม.26)
+
+    นับว่า "มีสิทธิ์" ถ้ามี session authenticated ที่ยังไม่จบ หรือ pending ที่ยังไม่หมดเวลา (เพิ่งอนุมัติ openNDS
+    เปิดให้แล้วแต่ cafe-reconcile ยังไม่ทันยืนยัน -- ห้ามตัด) · เครื่อง Trusted (AP ฯลฯ) ไม่อยู่ใน macs อยู่แล้ว
+    """
+    if not macs:
+        return []
+    rows = query_all_fn(
+        "SELECT DISTINCT UPPER(mac) AS mac FROM portal_session "
+        "WHERE (state='authenticated' AND ended_at IS NULL) "
+        "OR (state='pending' AND pending_until > NOW())")
+    allowed = {r["mac"].upper() for r in rows}
+    return sorted(m for m in macs if m.upper() not in allowed)
+
+
 def find_sessions_gone(query_all_fn, macs: set[str],
                        grace_seconds: int = GONE_GRACE_SECONDS) -> list[dict]:
     """
@@ -370,14 +394,25 @@ def run(deauth: bool = True) -> EnforceSummary:
                     n_gone += 1
                     log.info("ปิด session %s (%s) -- ไม่อยู่ใน openNDS แล้ว", row["id"], row["mac"])
 
+        # N44: ตรวจย้อนทาง -- openNDS ปล่อยออนไลน์ แต่ฐานข้อมูลไม่มีสิทธิ์ (openNDS คืนสิทธิ์เองตอนรีสตาร์ท)
+        n_orphans = 0
+        if macs is not None:
+            for mac in find_orphan_macs(_query_all, macs):
+                if deauth_mac(mac):
+                    n_orphans += 1
+                    log.warning("ตัดเครื่อง %s -- openNDS ปล่อยออนไลน์แต่ไม่มีสิทธิ์ในฐานข้อมูล", mac)
+                    from common import audit
+                    audit.log("orphan_deauth", target=mac,
+                              detail="openNDS ให้ใช้เน็ตแต่ไม่มี session ในฐานข้อมูล (เช่น คืนสิทธิ์เองหลังรีสตาร์ท)")
+
     summary = EnforceSummary(expired_vouchers=n_expired, used_up_vouchers=n_used_up,
-                             sessions_gone=n_gone,
+                             sessions_gone=n_gone, orphans_deauthed=n_orphans,
                              sessions_closed=closed,
                              deauth_ok=deauth_ok, deauth_failed=deauth_failed)
     log.info("enforce เสร็จ: voucher expired %d, used_up %d, session ปิด %d "
-            "(deauth สำเร็จ %d, ล้มเหลว/ข้าม %d), session ที่หลุดไปแล้ว %d",
+            "(deauth สำเร็จ %d, ล้มเหลว/ข้าม %d), session ที่หลุดไปแล้ว %d, ตัดเครื่องไม่มีสิทธิ์ %d",
             summary.expired_vouchers, summary.used_up_vouchers, summary.sessions_closed,
-            summary.deauth_ok, summary.deauth_failed, summary.sessions_gone)
+            summary.deauth_ok, summary.deauth_failed, summary.sessions_gone, summary.orphans_deauthed)
     return summary
 
 

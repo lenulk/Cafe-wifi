@@ -17,3 +17,4 @@
 - [Admin reachable from customer LAN](admin-access-from-customer-lan.md) — option B; openNDS users_to_router must include ADMIN_PORT (replaces defaults)
 - [⏰ REMIND: service Wi-Fi + SSH hardening](pending-service-wifi-reminder.md) — user asked to be reminded; before shop handover: technician hotspot on wlan0, change ras pw 1234, remove NetworkLab
 - [ENOBUFS status](enobufs-status.md) — N43 reduced events (lo notrack + kernel -s filter) but ENOBUFS still seen; buffer verified 64MB; needs a day of normal-operation monitoring
+- [openNDS restores clients on restart](opennds-restores-clients-on-restart.md) — N44: openNDS re-auths remembered MACs ignoring DB; enforce sweeps orphans + runs 45s after openNDS start

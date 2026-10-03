@@ -583,3 +583,21 @@ def test_ndsctl_busy_forever_gives_up(monkeypatch):
     monkeypatch.setattr(ev, "_running_as_root", lambda: True)
     assert ev.deauth_mac("AA:BB:CC:DD:EE:FF") is False
     assert ev.authenticated_macs() is None
+
+
+
+# ---------------------------------------------------------------- N44: ตรวจย้อนทาง openNDS -> ฐานข้อมูล
+def test_find_orphan_macs_flags_online_devices_without_db_session():
+    """openNDS คืนสิทธิ์ให้เครื่องที่ถูก revoke ไปแล้วเองตอนรีสตาร์ท -- ต้องจับได้"""
+    seen = []
+
+    def query_all(sql, args=()):
+        seen.append(sql)
+        return [{"mac": "00:E0:4C:36:04:06"}, {"mac": "aa:bb:cc:dd:ee:02"}]  # มีสิทธิ์ (authenticated/pending)
+    online = {"00:E0:4C:36:04:06", "E4:0D:36:00:59:D3", "6A:09:30:A8:A5:74", "AA:BB:CC:DD:EE:02"}
+    assert ev.find_orphan_macs(query_all, online) == ["6A:09:30:A8:A5:74", "E4:0D:36:00:59:D3"]
+    assert "state='pending' AND pending_until > NOW()" in seen[0], "เพิ่งอนุมัติ (pending) ห้ามตัด"
+
+
+def test_find_orphan_macs_nothing_online():
+    assert ev.find_orphan_macs(lambda *a: pytest.fail("ไม่ต้องคิวรี่"), set()) == []

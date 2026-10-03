@@ -1618,6 +1618,15 @@ build_opennds() {
 ExecStartPre=-/bin/sh -c 'pgrep -x opennds >/dev/null || rm -f /tmp/ndscids/heartbeat'
 NDSDROPIN
 
+  # N44: openNDS คืนสิทธิ์ให้ทุกเครื่องที่จำไว้เองตอนสตาร์ท (ไม่รู้จักฐานข้อมูลของเรา) -- สั่งตรวจย้อนทาง
+  # (cafe-enforce: ตัดเครื่องที่ไม่มีสิทธิ์) หลังสตาร์ท ~45 วิ แทนที่จะรอรอบ 5 นาทีปกติ · systemd-run ไม่บล็อก
+  # การสตาร์ทของ openNDS และ "-" = ไม่มี systemd-run ก็ไม่ทำให้ openNDS สตาร์ทไม่ขึ้น
+  write_file /etc/systemd/system/opennds.service.d/cafe-wifi-orphan-sweep.conf 0644 <<'NDSDROPIN'
+# managed by cafe-wifi installer -- ห้ามแก้มือ
+[Service]
+ExecStartPost=-/usr/bin/systemd-run --quiet --collect --on-active=45 /usr/bin/systemctl start --no-block cafe-enforce.service
+NDSDROPIN
+
   # N23: openNDS คือประตูที่ปล่อยลูกค้าออกเน็ต ต้องไม่เปิดก่อนนาฬิกาถูก (ดูเหตุผลที่ configure_time)
   write_file /etc/systemd/system/opennds.service.d/cafe-wifi-time-sync.conf 0644 <<'NDSDROPIN'
 # managed by cafe-wifi installer -- ห้ามแก้มือ
