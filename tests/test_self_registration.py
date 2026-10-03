@@ -664,7 +664,8 @@ def test_dashboard_and_recent_requests_show_device_names(fas, admin):
     html = admin.get("/requests").get_data(as_text=True)
     assert html.count("Somchais-iPhone") >= 1, "รายการล่าสุดแสดงชื่อเครื่อง"
     # แดชบอร์ด: ใช้ fake แบบย่อ -- เรียก helper ตรง ๆ ว่าจัดกลุ่ม/ออนไลน์ถูก
-    devs = admin.application.view_functions["dashboard"].__globals__["_devices_by"]("id", [1])
+    from admin.views.overview import _devices_by
+    devs = _devices_by("id", [1])
     assert devs[1][0]["hostname"] == "Somchais-iPhone" and devs[1][0]["online"] is True
 
 
