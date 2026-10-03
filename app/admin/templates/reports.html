@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}รายงาน{% endblock %}
+{% set thai_dow = ['จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.', 'อา.'] %}
+{% block body %}
+<style>
+  .bars{display:flex;align-items:flex-end;gap:4px;height:170px;padding:.5rem 0 0;border-bottom:1px solid var(--line)}
+  .bars .col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;min-width:0}
+  .bars .bar{width:100%;max-width:38px;border-radius:5px 5px 0 0;background:var(--accent);min-height:2px}
+  .bars .bar.data{background:#5b8def}
+  .bars .bar.hour{background:#e0a030}
+  .bars .val{font-size:.72rem;color:var(--muted);margin-bottom:2px;white-space:nowrap}
+  .axis{display:flex;gap:4px}
+  .axis span{flex:1;text-align:center;font-size:.7rem;color:var(--muted);min-width:0;overflow:hidden;white-space:nowrap}
+  .ranges a{padding:.3rem .85rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)}
+  .ranges a.on{border-color:var(--accent);color:var(--accent);font-weight:700}
+</style>
+
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+  <h1 style="margin:0">รายงานสรุป</h1>
+  <div class="ranges" style="display:flex;gap:.4rem">
+    {% for k, label in ranges.items() %}
+    <a href="{{ url_for('reports', range=k) }}" class="{{ 'on' if rng == k }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+<p class="hint">{{ r.start.strftime('%d/%m/%Y') }} – วันนี้ · คำนวณเมื่อ {{ r.generated_at.strftime('%H:%M') }}
+  (อัปเดตทุก 5 นาที · <a href="{{ url_for('reports', range=rng, refresh=1) }}">คำนวณใหม่ตอนนี้</a>)
+  · ตัวเลขรวมเท่านั้น ไม่มีข้อมูลรายบุคคล</p>
+
+<div class="grid">
+  <div class="stat"><b>{{ r.total_customers }}</b><span>ลูกค้า (ไม่นับซ้ำ)</span></div>
+  <div class="stat"><b>{{ r.total_new }}</b><span>ลูกค้าใหม่</span></div>
+  <div class="stat"><b>{{ r.total_sessions }}</b><span>ครั้งที่เข้าใช้ (ทุกเครื่อง)</span></div>
+  <div class="stat"><b>{{ r.total_bytes|human_bytes }}</b><span>ปริมาณเน็ตที่ใช้รวม</span></div>
+</div>
+
+{% if r.busiest or r.peak_hour is not none %}
+<div class="msg ok" style="margin-top:1rem">
+  {% if r.busiest %}วันที่คนมากที่สุด: <b>{{ thai_dow[r.busiest.date.weekday()] }} {{ r.busiest.date.strftime('%d/%m') }}</b>
+    ({{ r.busiest.customers }} คน){% endif %}
+  {% if r.peak_hour is not none %} · ช่วงที่แน่นที่สุด: <b>{{ '%02d' % r.peak_hour }}:00–{{ '%02d' % ((r.peak_hour + 1) % 24) }}:00 น.</b>{% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-top:1rem">
+  <h2>ลูกค้าต่อวัน</h2>
+  <div class="bars">
+    {% for d in r.days %}
+    <div class="col" title="{{ d.date.strftime('%d/%m') }}: ลูกค้า {{ d.customers }} คน (ใหม่ {{ d.new }}) · {{ d.devices }} เครื่อง · อนุมัติ {{ d.approvals }} ครั้ง">
+      <span class="val">{{ d.customers or '' }}</span>
+      <div class="bar" style="height:{{ (d.customers * 100 / r.max_customers)|round(1) }}%"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="axis">{% for d in r.days %}<span>{% if r.days|length <= 7 %}{{ thai_dow[d.date.weekday()] }} {% endif %}{{ d.date.strftime('%d') }}</span>{% endfor %}</div>
+</div>
+
+<div class="card">
+  <h2>ปริมาณเน็ตต่อวัน</h2>
+  <div class="bars">
+    {% for d in r.days %}
+    <div class="col" title="{{ d.date.strftime('%d/%m') }}: {{ d.bytes|human_bytes }}">
+      <span class="val">{% if r.days|length <= 7 %}{{ d.bytes|human_bytes if d.bytes else '' }}{% endif %}</span>
+      <div class="bar data" style="height:{{ (d.bytes * 100 / r.max_bytes)|round(1) }}%"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="axis">{% for d in r.days %}<span>{{ d.date.strftime('%d') }}</span>{% endfor %}</div>
+  <p class="hint">นับจากข้อมูลการเชื่อมต่อที่ปิดแล้ว (ดาวน์โหลด + อัปโหลด)</p>
+</div>
+
+<div class="card">
+  <h2>ช่วงเวลาที่ลูกค้าเข้าใช้</h2>
+  <div class="bars">
+    {% for n in r.hours %}
+    <div class="col" title="{{ '%02d' % loop.index0 }}:00 น.: เข้าใช้ {{ n }} ครั้ง">
+      <span class="val">{{ n or '' }}</span>
+      <div class="bar hour" style="height:{{ (n * 100 / r.max_hour)|round(1) }}%"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="axis">{% for n in r.hours %}<span>{{ loop.index0 if loop.index0 % 3 == 0 else '' }}</span>{% endfor %}</div>
+  <p class="hint">นับครั้งที่เครื่องเริ่มใช้เน็ต แยกตามชั่วโมง (รวมทุกวันในช่วงที่เลือก)</p>
+</div>
+
+<div class="card">
+  <h2>การอนุมัติแยกตามพนักงาน</h2>
+  {% if not r.staff %}<p class="hint">ยังไม่มีการอนุมัติในช่วงนี้</p>{% else %}
+  <table>
+    <tr><th>พนักงาน</th><th>อนุมัติ (ครั้ง)</th></tr>
+    {% for s in r.staff %}<tr><td>{{ s.display_name or s.username }}</td><td>{{ s.n }}</td></tr>{% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

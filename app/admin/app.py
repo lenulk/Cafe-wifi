@@ -1315,6 +1315,72 @@ def evidence():
     return resp
 
 
+# ---------------------------------------------------------------- รายงานสรุป
+# ใช้ทั้งในร้าน (วันไหน/ช่วงไหนคนแน่น) และเป็นผลลัพธ์ในเล่ม · ไม่มีข้อมูลรายบุคคล มีแต่ตัวเลขรวม
+REPORT_RANGES = {"7": "7 วันล่าสุด", "30": "30 วันล่าสุด"}
+_report_cache: dict = {}
+REPORT_CACHE_SEC = 300  # SUM(conn_log) 30 วันบนร้านจริงอาจหลายวินาที -- คำนวณซ้ำทุก 5 นาทีพอ
+
+
+def _build_report(days: int) -> dict:
+    start = (datetime.now() - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    per_day = {(start + timedelta(days=i)).date(): dict(customers=0, sessions=0, devices=0, new=0, bytes=0,
+                                                         approvals=0)
+               for i in range(days)}
+    for r in query_all(
+            "SELECT DATE(ps.authenticated_at) AS d, COUNT(DISTINCT v.customer_id) AS customers, "
+            "COUNT(*) AS sessions, COUNT(DISTINCT ps.mac) AS devices FROM portal_session ps "
+            "JOIN voucher v ON v.id = ps.voucher_id WHERE ps.authenticated_at >= %s GROUP BY d", (start,)):
+        if r["d"] in per_day:
+            per_day[r["d"]].update(customers=r["customers"], sessions=r["sessions"], devices=r["devices"])
+    for r in query_all("SELECT DATE(first_seen) AS d, COUNT(*) AS n FROM customer "
+                       "WHERE first_seen >= %s GROUP BY d", (start,)):
+        if r["d"] in per_day:
+            per_day[r["d"]]["new"] = r["n"]
+    for r in query_all("SELECT DATE(ts) AS d, SUM(bytes_in + bytes_out) AS b FROM conn_log "
+                       "WHERE ts >= %s GROUP BY d", (start,)):
+        if r["d"] in per_day:
+            per_day[r["d"]]["bytes"] = int(r["b"] or 0)
+    for r in query_all("SELECT DATE(decided_at) AS d, COUNT(*) AS n FROM access_request "
+                       "WHERE status = 'approved' AND decided_at >= %s GROUP BY d", (start,)):
+        if r["d"] in per_day:
+            per_day[r["d"]]["approvals"] = r["n"]
+    hours = [0] * 24
+    for r in query_all("SELECT HOUR(authenticated_at) AS h, COUNT(*) AS n FROM portal_session "
+                       "WHERE authenticated_at >= %s GROUP BY h", (start,)):
+        hours[int(r["h"])] = int(r["n"])
+    staff_rows = query_all(
+        "SELECT s.username, s.display_name, COUNT(*) AS n FROM access_request ar "
+        "JOIN staff s ON s.id = ar.decided_by WHERE ar.status = 'approved' AND ar.decided_at >= %s "
+        "GROUP BY s.id, s.username, s.display_name ORDER BY n DESC", (start,))
+    totals = query_one(
+        "SELECT COUNT(DISTINCT v.customer_id) AS customers, COUNT(*) AS sessions FROM portal_session ps "
+        "JOIN voucher v ON v.id = ps.voucher_id WHERE ps.authenticated_at >= %s", (start,)) or {}
+    days_list = [dict(date=d, **v) for d, v in sorted(per_day.items())]
+    return dict(
+        start=start, days=days_list, hours=hours, staff=staff_rows,
+        total_customers=int(totals.get("customers") or 0), total_sessions=int(totals.get("sessions") or 0),
+        total_new=sum(d["new"] for d in days_list), total_bytes=sum(d["bytes"] for d in days_list),
+        max_customers=max([d["customers"] for d in days_list] + [1]),
+        max_bytes=max([d["bytes"] for d in days_list] + [1]), max_hour=max(hours + [1]),
+        peak_hour=(hours.index(max(hours)) if any(hours) else None),
+        busiest=(max(days_list, key=lambda d: d["customers"]) if any(d["customers"] for d in days_list) else None),
+        generated_at=datetime.now())
+
+
+@app.get("/reports")
+@login_required
+def reports():
+    rng = request.args.get("range", "7")
+    if rng not in REPORT_RANGES:
+        rng = "7"
+    cached = _report_cache.get(rng)
+    if not cached or time.time() - cached[0] > REPORT_CACHE_SEC or request.args.get("refresh") == "1":
+        cached = (time.time(), _build_report(int(rng)))
+        _report_cache[rng] = cached
+    return render_template("reports.html", r=cached[1], rng=rng, ranges=REPORT_RANGES)
+
+
 LOGS_CSV_MAX = 5000
 LOG_MAX_SPAN = timedelta(days=31)
 LOG_RANGES = {"1h": "1 ชม.ล่าสุด", "today": "วันนี้", "yesterday": "เมื่อวาน",
