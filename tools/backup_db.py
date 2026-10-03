@@ -30,6 +30,7 @@ SELECT/INSERT/UPDATE/DELETE (แก้บั๊ก GRANT ALL รอบ 3) -- ถ
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -121,7 +122,23 @@ def prune_old_backups(backup_dir: Path, keep_days: int, pattern: str = "*.sql.gz
     return pruned
 
 
-def copy_offsite(src: Path, offsite_dir: str | None) -> Path | None:
+# 2026-10-03: install.sh ตั้งให้ USB ที่ตั้งชื่อ (label) ว่า CAFEBACKUP mount อัตโนมัติที่ /mnt/cafe-backup
+# (fstab: nofail + x-systemd.automount -- เสียบทีหลังก็ใช้ได้ ไม่เสียบก็บูตได้) แล้วชี้ OFFSITE_BACKUP_DIR มาที่นั่น
+# กับดัก: ถ้าไม่ได้เสียบ USB แต่ปลายทางเป็นโฟลเดอร์ธรรมดา การคัดลอกจะ "สำเร็จ" ลง SD ใบเดิมเงียบ ๆ
+# ซึ่งไม่ช่วยอะไรเลยถ้าการ์ดเสีย -- จึงต้องเช็คว่าปลายทางอยู่คนละอุปกรณ์กับ backup ในเครื่องจริง
+_last_offsite_error: str | None = None
+
+
+def _same_device(a: Path, b: Path) -> bool:
+    """a ยังไม่มีอยู่ได้ (USB ใหม่ยังไม่มีโฟลเดอร์) -- ไล่ขึ้นไปหาโฟลเดอร์แม่ที่มีอยู่จริง
+    os.stat ตรงนี้ทำให้ automount ทำงาน ถ้าไม่มี USB เสียบอยู่จะ raise OSError (ผู้เรียกจับเอง)"""
+    while not a.exists() and a != a.parent:
+        a = a.parent
+    return os.stat(a).st_dev == os.stat(b).st_dev
+
+
+def copy_offsite(src: Path, offsite_dir: str | None,
+                 require_separate_device: bool = False) -> Path | None:
     """
     คัดลอก backup ออกนอกเครื่อง (N4) ถ้าตั้ง OFFSITE_BACKUP_DIR ไว้ -- คืน path ปลายทางถ้า
     สำเร็จ, None ถ้าข้าม (ไม่ได้ตั้งค่า) หรือคัดลอกไม่สำเร็จ
@@ -131,7 +148,10 @@ def copy_offsite(src: Path, offsite_dir: str | None) -> Path | None:
     ทั้ง backup_db.py ถือว่าล้มเหลว (log ไว้ให้เห็นชัดเจนแทน แล้วปล่อยให้ backup ในเครื่อง
     ที่ทำสำเร็จแล้วยังมีประโยชน์ต่อไป)
     """
+    global _last_offsite_error
+    _last_offsite_error = None
     if not offsite_dir:
+        _last_offsite_error = "ไม่ได้ตั้งค่าที่สำรองนอกเครื่อง"
         log.info("ไม่ได้ตั้ง OFFSITE_BACKUP_DIR — ข้าม backup ออกนอกเครื่อง "
                  "(backup ยังอยู่ในเครื่องเดียวกันที่ %s เท่านั้น เสี่ยงถ้า SD card พังทั้งใบ)", src)
         return None
@@ -139,16 +159,60 @@ def copy_offsite(src: Path, offsite_dir: str | None) -> Path | None:
     dest_dir = Path(offsite_dir)
     dest_path = dest_dir / src.name
     try:
+        if require_separate_device and _same_device(dest_dir, src.parent):
+            _last_offsite_error = "ไม่ได้เสียบ USB สำรองข้อมูล (ปลายทางอยู่บน SD card ใบเดียวกัน)"
+            log.error("%s — ข้าม: %s", _last_offsite_error, dest_dir)
+            return None
         dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest_path)
-        dest_path.chmod(0o600)  # เนื้อหาเดียวกับต้นฉบับ มี natid_enc เข้ารหัสอยู่
+        tmp_dest = dest_path.with_suffix(dest_path.suffix + ".tmp")
+        # copyfile ไม่ใช่ copy2: USB ที่ซื้อมาส่วนใหญ่เป็น FAT/exFAT ซึ่ง chmod/copystat ไม่ได้ (EPERM)
+        shutil.copyfile(src, tmp_dest)
+        os.replace(tmp_dest, dest_path)  # ถอด USB กลางคันจะไม่เหลือไฟล์ครึ่ง ๆ ที่ชื่อเหมือนไฟล์จริง
+        try:
+            dest_path.chmod(0o600)  # เนื้อหาเดียวกับต้นฉบับ มี natid_enc เข้ารหัสอยู่ (ext4 ได้, FAT ข้าม)
+        except OSError:
+            pass
     except OSError as exc:
+        # automount ที่ไม่มีอุปกรณ์เสียบอยู่ตอบ ENODEV/timeout ตรงนี้ = ไม่ได้เสียบ USB
+        import errno
+        if exc.errno in (errno.ENODEV, errno.ENOENT, errno.ENXIO, errno.ETIMEDOUT):
+            _last_offsite_error = "ไม่ได้เสียบ USB สำรองข้อมูล (ชื่อ CAFEBACKUP)"
+        else:
+            _last_offsite_error = f"เขียนลง USB ไม่ได้: {exc.strerror or exc}"
         log.error("คัดลอก backup ออกนอกเครื่องไปที่ %s ไม่สำเร็จ: %s — backup ในเครื่องยังอยู่ที่ %s",
                   dest_path, exc, src)
         return None
 
     log.info("คัดลอก backup ออกนอกเครื่องสำเร็จ: %s", dest_path)
     return dest_path
+
+
+def write_status(path: Path, result: "BackupResult | None", error: str | None = None) -> None:
+    """สรุปผลการสำรองล่าสุดให้หน้า /status อ่าน (ไม่มีความลับ -- แค่เวลา/ขนาด/ผล USB)"""
+    data = dict(at=datetime.now().isoformat(timespec="seconds"), ok=result is not None, error=error)
+    if result is not None:
+        data.update(file=result.path.name, size=result.size_bytes,
+                    offsite_ok=result.offsite_path is not None,
+                    offsite_path=str(result.offsite_path) if result.offsite_path else None,
+                    offsite_error=None if result.offsite_path else _last_offsite_error)
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.chmod(0o644)
+        tmp.replace(path)
+    except OSError as exc:
+        log.warning("เขียนสถานะ backup ไม่สำเร็จ: %s", exc)
+
+
+def read_status(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def status_path() -> Path:
+    return Path(os.environ.get("LOG_DIR", "/var/log/cafe-wifi")) / "backup-status.json"
 
 
 def run(backup_dir: Path | None = None, keep_days: int | None = None,
@@ -170,8 +234,12 @@ def run(backup_dir: Path | None = None, keep_days: int | None = None,
         out_path=out_path,
     )
     size = out_path.stat().st_size
-    offsite_path = copy_offsite(out_path, offsite_dir)  # N4
+    offsite_path = copy_offsite(out_path, offsite_dir,  # N4
+                                require_separate_device=os.environ.get("OFFSITE_REQUIRE_SEPARATE_DEVICE") == "1")
     pruned = prune_old_backups(backup_dir, keep_days)
+    if offsite_path is not None:
+        # ไฟล์ dump แต่ละไฟล์มีข้อมูลครบทั้งฐาน (log ย้อนหลังทั้งช่วงเก็บ) เก็บบน USB เท่ากับในเครื่องก็พอ
+        prune_old_backups(offsite_path.parent, keep_days)
     log.info("สำรอง DB สำเร็จ: %s (%d bytes) — ลบ backup เก่า %d ไฟล์ — offsite: %s",
             out_path, size, pruned, offsite_path or "ข้าม")
     return BackupResult(path=out_path, size_bytes=size, pruned=pruned, offsite_path=offsite_path)
@@ -180,10 +248,12 @@ def run(backup_dir: Path | None = None, keep_days: int | None = None,
 def main() -> int:  # pragma: no cover
     logging.basicConfig(level=logging.INFO)
     try:
-        run()
+        result = run()
     except BackupError as exc:
         log.error(str(exc))
+        write_status(status_path(), None, str(exc))
         return 1
+    write_status(status_path(), result)
     return 0
 
 

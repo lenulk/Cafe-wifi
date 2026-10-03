@@ -112,6 +112,22 @@
 </script>
 
 <div class="card">
+  <h2>สำรองข้อมูล</h2>
+  {% if not backup.at %}
+    <p><span class="badge warn">ยังไม่เคยสำรอง</span> <span class="hint">ระบบสำรองอัตโนมัติทุกวันตี 3:30</span></p>
+  {% else %}
+    <p>{% if backup.ok %}<span class="badge ok">สำรองสำเร็จ</span>{% else %}<span class="badge err">สำรองไม่สำเร็จ</span>{% endif %}
+      ล่าสุด {{ backup.at.replace('T', ' ')[:16] }}{% if backup.size %} · {{ backup.size|human_bytes }}{% endif %}
+      {% if backup.error %}<br><span class="hint">{{ backup.error }}</span>{% endif %}</p>
+    <p>{% if backup.offsite_ok %}<span class="badge ok">✓ คัดลอกลง USB แล้ว</span>
+       {% else %}<span class="badge err">⚠ ไม่ได้คัดลอกลง USB</span>
+         <span class="hint">{{ backup.offsite_error or '' }}</span>{% endif %}</p>
+  {% endif %}
+  <p class="hint">USB สำรองข้อมูล (ชื่อ CAFEBACKUP): {{ '✓ เสียบอยู่' if backup.usb_present else '✗ ไม่ได้เสียบ' }}
+    — ถ้า SD card เสีย ข้อมูลและไฟล์สำรองในเครื่องจะหายพร้อมกัน ต้องมีสำเนาบน USB เสมอ (ดู docs/backup-usb.md)</p>
+</div>
+
+<div class="card">
   <h2>พื้นที่ดิสก์</h2>
   <table>
     <tr><th>ไดเรกทอรี</th><th>ใช้ไป</th><th>เหลือ</th><th>สถานะ</th></tr>

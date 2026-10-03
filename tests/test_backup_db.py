@@ -10,6 +10,7 @@ import gzip
 import os
 import shutil
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -191,3 +192,45 @@ def test_run_copies_offsite_when_env_is_set(tmp_path, monkeypatch):
     assert result.offsite_path is not None
     assert result.offsite_path.exists()
     assert result.offsite_path.read_bytes() == result.path.read_bytes()
+
+
+# ---------------------------------------------------------------- USB สำรองข้อมูล (2026-10-03)
+def test_copy_offsite_refuses_same_device_when_usb_required(tmp_path):
+    """ไม่ได้เสียบ USB แต่ปลายทางเป็นโฟลเดอร์บน SD ใบเดิม -- ห้าม 'สำเร็จ' เงียบ ๆ"""
+    import tools.backup_db as bdb
+    src = tmp_path / "backup.sql.gz"
+    src.write_bytes(b"x")
+    assert copy_offsite(src, offsite_dir=str(tmp_path / "usb" / "cafe-wifi"),
+                        require_separate_device=True) is None
+    assert "ไม่ได้เสียบ USB" in bdb._last_offsite_error
+    assert not (tmp_path / "usb").exists(), "ต้องไม่สร้างโฟลเดอร์บน SD"
+
+
+def test_copy_offsite_works_on_fat_usb_where_chmod_fails(tmp_path, monkeypatch):
+    """USB ส่วนใหญ่เป็น FAT/exFAT -- chmod/copystat ทำไม่ได้ ต้องยังคัดลอกสำเร็จ"""
+    src = tmp_path / "backup.sql.gz"
+    src.write_bytes(b"data")
+    real_chmod = Path.chmod
+
+    def fat_chmod(self, mode, *a, **k):
+        if "offsite" in str(self):
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(self, mode, *a, **k)
+    monkeypatch.setattr(Path, "chmod", fat_chmod)
+    result = copy_offsite(src, offsite_dir=str(tmp_path / "offsite"))
+    assert result is not None and result.read_bytes() == b"data"
+    assert not list((tmp_path / "offsite").glob("*.tmp"))
+
+
+def test_status_file_round_trip(tmp_path):
+    import tools.backup_db as bdb
+    from tools.backup_db import BackupResult
+    st = tmp_path / "backup-status.json"
+    bdb._last_offsite_error = "ไม่ได้เสียบ USB สำรองข้อมูล"
+    bdb.write_status(st, BackupResult(path=tmp_path / "cafewifi-x.sql.gz", size_bytes=1234, pruned=0))
+    d = bdb.read_status(st)
+    assert d["ok"] and d["size"] == 1234 and d["offsite_ok"] is False
+    assert "ไม่ได้เสียบ USB" in d["offsite_error"]
+    bdb.write_status(st, None, "mysqldump exit code 2")
+    assert bdb.read_status(st)["ok"] is False
+    assert bdb.read_status(tmp_path / "missing.json") is None

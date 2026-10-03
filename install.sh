@@ -26,6 +26,8 @@ readonly APP_USER="cafewifi"
 readonly ETC_DIR="/etc/${APP_NAME}"
 readonly OPT_DIR="/opt/${APP_NAME}"
 readonly LOG_DIR="/var/log/${APP_NAME}"
+readonly BACKUP_USB_LABEL="CAFEBACKUP"            # ตั้งชื่อ USB นี้แล้วเสียบ = สำรองออกนอก SD อัตโนมัติ
+readonly BACKUP_USB_MNT="/mnt/cafebackup"
 readonly BACKUP_DIR="/var/backups/${APP_NAME}"  # แก้บั๊ก H4 (เดิมไม่มี backup DB เลยในระบบ)
 # macvlan ฝั่งลูกค้า ซ้อนบน $NIC -- ดูเหตุผลเต็มๆ ที่ configure_network() (R11/§3.1.6 Plan B
 # ที่พิสูจน์แล้วจาก VM lab ว่าเป็นทางเดียวที่ openNDS ยอมทำงานบนโหมดสายเดียว)
@@ -147,6 +149,30 @@ NMDNS
   printf '# managed by %s installer -- DNS ของตัว Pi (ลูกค้าใช้ dnsmasq ที่ %s)\n%s' \
     "$APP_NAME" "${CLIENT_CIDR%%/*}" "$body" | write_file /etc/resolv.conf 0644
   ok "ตั้ง DNS ของ Pi: ${HOST_DNS} (ไม่พึ่ง DHCP/Wi-Fi)"
+}
+
+# ---------- สำรองข้อมูลลง USB (2026-10-03) ----------
+# backup รายวันเดิมอยู่บน SD card ใบเดียวกับฐานข้อมูล -- การ์ดเสีย (เรื่องปกติของ Pi) = ข้อมูลและ backup
+# หายพร้อมกัน log ย้อนหลังตาม ม.26 หายหมด · ให้ USB ที่ตั้งชื่อ (label) ${BACKUP_USB_LABEL} mount เองที่
+# ${BACKUP_USB_MNT}: nofail = ไม่เสียบก็บูตได้, x-systemd.automount = เสียบทีหลังก็ใช้ได้ไม่ต้องรีบูต
+configure_backup_usb() {
+  step "สำรองข้อมูลลง USB (label ${BACKUP_USB_LABEL})"
+  run install -d -m 0700 "$BACKUP_USB_MNT"
+  local line="LABEL=${BACKUP_USB_LABEL} ${BACKUP_USB_MNT} auto nofail,noatime,x-systemd.automount,x-systemd.idle-timeout=120,x-systemd.device-timeout=3s 0 2"
+  if grep -q "^LABEL=${BACKUP_USB_LABEL}[[:space:]]" /etc/fstab 2>/dev/null; then
+    run_sh "sed -i 's|^LABEL=${BACKUP_USB_LABEL}[[:space:]].*|${line}|' /etc/fstab"
+  else
+    run_sh "printf '%s\\n' '# ${APP_NAME}: USB สำรองข้อมูล (ไม่เสียบก็บูตได้)' '${line}' >> /etc/fstab"
+  fi
+  if [[ "$INIT_SYS" == systemd ]]; then
+    run_sh "systemctl daemon-reload && systemctl restart '$(systemd-escape -p --suffix=automount "$BACKUP_USB_MNT")' 2>/dev/null || true"
+  fi
+  if [[ -e "/dev/disk/by-label/${BACKUP_USB_LABEL}" ]]; then
+    ok "พบ USB ${BACKUP_USB_LABEL} — backup รายวันจะคัดลอกไปที่ ${BACKUP_USB_MNT}/${APP_NAME}"
+  else
+    warn "ยังไม่ได้เสียบ USB สำรองข้อมูล — ตั้งชื่อ USB เป็น ${BACKUP_USB_LABEL} แล้วเสียบได้ทุกเมื่อ"
+    warn "  (ดูวิธีเตรียม USB ใน docs/backup-usb.md) ระหว่างนี้ backup อยู่บน SD card ใบเดียวกันเท่านั้น"
+  fi
 }
 
 on_error() {
@@ -578,7 +604,8 @@ gen_secrets() {
     for kv in "UPLINK_IP=${UPLINK_CIDR%%/*}" "UPLINK_GW=${UPLINK_GW}" \
               "UPLINK_NETWORK=$(cidr_to_network "$UPLINK_CIDR")" \
               "GATEWAY_IP=${CLIENT_CIDR%%/*}" "CLIENT_CIDR=${CLIENT_CIDR}" \
-              "ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login"; do
+              "ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login" \
+              "OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}" "OFFSITE_REQUIRE_SEPARATE_DEVICE=1"; do
       key="${kv%%=*}"
       if grep -q "^${key}=" "$secrets"; then
         sed -i "s|^${key}=.*|${kv}|" "$secrets"
@@ -641,6 +668,10 @@ LOG_DIR=${LOG_DIR}
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
 BACKUP_DIR=${BACKUP_DIR}
 BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS}
+# สำรองออกนอก SD card: USB ที่ label = ${BACKUP_USB_LABEL} (ดู configure_backup_usb) -- ไม่เสียบก็ไม่พัง
+# แค่หน้าสถานะเตือน · REQUIRE_SEPARATE_DEVICE กันกรณีไม่ได้เสียบแล้วไฟล์ไปลง SD ใบเดิมเงียบ ๆ
+OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}
+OFFSITE_REQUIRE_SEPARATE_DEVICE=1
 SECRETS
 
   write_file "${ETC_DIR}/setup.token" 0640 "root:${APP_USER}" <<TOKEN
@@ -2160,6 +2191,7 @@ main() {
   install_app_files
   setup_database
   configure_time
+  configure_backup_usb
   configure_network
   build_opennds
   install_services

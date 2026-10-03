@@ -235,8 +235,11 @@ def health():
 def status_page():
     from common.health import build_status
     data = build_status(str(LOG_DIR))
+    from tools import backup_db
+    backup = backup_db.read_status(backup_db.status_path()) or {}
+    backup["usb_present"] = os.path.exists("/dev/disk/by-label/CAFEBACKUP")
     return render_template("status.html", res=sysinfo.resources(), inet=sysinfo.internet_status(),
-                           speed=sysinfo.last_speed_test(), **data)
+                           speed=sysinfo.last_speed_test(), backup=backup, **data)
 
 
 @app.get("/status/live")
