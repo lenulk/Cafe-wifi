@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import hashlib
+import io
 import json
 import os
 import re
@@ -1177,6 +1178,114 @@ def _add_unidentified_hints(rows) -> None:
         if s:
             r["hint"] = dict(hostname=s["hostname"], os_label=s["os_label"],
                              natid_masked=s["natid_masked"], when=when)
+
+
+# ---------------------------------------------------------------- ส่งออกหลักฐาน (ม.26 / คำสั่งเจ้าหน้าที่)
+# เดิมต้อง SSH เข้าไปรัน tools/export_evidence.py -- เจ้าของร้านทำเองไม่ได้ และ SSH เข้าจากวงลูกค้าไม่ได้
+# หน้านี้ใช้ตรรกะชุดเดียวกับเครื่องมือนั้นเป๊ะ (คิวรี่/JOIN/manifest) ไฟล์บนเว็บกับไฟล์จาก CLI จึงตรงกันเสมอ
+EVIDENCE_MAX_DAYS_PERSON = 186   # รายคน/รายเครื่อง: ครอบระยะเก็บ 180 วันได้ทั้งหมด
+EVIDENCE_MAX_DAYS_ALL = 7        # ทุกเครื่อง: ข้อมูลเยอะมาก จำกัดไว้กันเครื่องค้าง
+
+
+@app.route("/evidence", methods=["GET", "POST"])
+@login_required
+@admin_required
+def evidence():
+    from tools import export_evidence as ev
+
+    history = query_all(
+        "SELECT a.ts, s.username, a.target, a.detail FROM audit_log a "
+        "LEFT JOIN staff s ON s.id = a.staff_id WHERE a.action = %s AND a.target LIKE 'evidence%%' "
+        "ORDER BY a.id DESC LIMIT 20", (audit.EXPORT_LOG,))
+    today = datetime.now().date()
+    form = dict(who=request.form.get("who", "natid"), start=request.form.get("start") or str(today),
+                end=request.form.get("end") or str(today), reason=request.form.get("reason", ""),
+                mac=request.form.get("mac", ""))
+    if request.method == "GET":
+        return render_template("evidence.html", form=form, history=history, error=None)
+
+    def fail(msg):
+        return render_template("evidence.html", form=form, history=history, error=msg), 400
+
+    reason = form["reason"].strip()
+    if len(reason) < 10:
+        return fail("ระบุเลขที่หนังสือ/คำสั่งของเจ้าหน้าที่ หรือเหตุผล อย่างน้อย 10 ตัวอักษร (บันทึกใน audit)")
+    try:
+        start = datetime.fromisoformat(form["start"])
+        end = ev.parse_range_end(form["end"])
+    except ValueError:
+        return fail("รูปแบบวันที่ไม่ถูกต้อง")
+    if end <= start:
+        return fail("วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่มต้น")
+
+    customer, mac = None, None
+    if form["who"] == "natid":
+        try:
+            customer = ev.find_customer(request.form.get("natid", ""), query_one)
+        except ValueError as exc:
+            return fail(str(exc))
+        if not customer:
+            return fail("ไม่พบลูกค้าที่ใช้เลขบัตรนี้")
+        limit = EVIDENCE_MAX_DAYS_PERSON
+    elif form["who"] == "mac":
+        try:
+            mac = ev.normalize_mac(form["mac"])
+        except ValueError as exc:
+            return fail(str(exc))
+        if not mac:
+            return fail("กรอก MAC ของเครื่อง")
+        limit = EVIDENCE_MAX_DAYS_PERSON
+    else:
+        limit = EVIDENCE_MAX_DAYS_ALL
+    if end - start > timedelta(days=limit):
+        return fail(f"ส่งออกได้ครั้งละไม่เกิน {limit} วันสำหรับแบบที่เลือก — แบ่งเป็นหลายครั้ง")
+
+    def rows(build):
+        if customer is not None:
+            return ev.query_customer_rows(build, customer["id"], start, end, query_all)
+        return query_all(*build(start, end, mac=mac))
+
+    conn_rows, dns_rows = rows(ev.build_conn_query), rows(ev.build_dns_query)
+    tag = f"customer{customer['id']}" if customer else (mac.replace(":", "") if mac else "all")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    conn_csv = ev.rows_to_csv_text(conn_rows, ev.CONN_FIELDS)
+    dns_csv = ev.rows_to_csv_text(dns_rows, ev.DNS_FIELDS)
+    conn_name, dns_name = f"conn_log_{tag}_{stamp}.csv", f"dns_log_{tag}_{stamp}.csv"
+    criteria = dict(mac=mac, start=start.isoformat(), end=end.isoformat(), reason=reason,
+                    exported_by=session.get("username"))
+    if customer:
+        criteria.update(customer_id=customer["id"], natid_masked=customer["natid_masked"])
+    manifest = ev.build_manifest(
+        [ev.ExportedFile(path=Path(conn_name), sha256=ev.sha256_text(conn_csv), row_count=len(conn_rows)),
+         ev.ExportedFile(path=Path(dns_name), sha256=ev.sha256_text(dns_csv), row_count=len(dns_rows))],
+        criteria)
+    readme = ("ไฟล์หลักฐานข้อมูลจราจรทางคอมพิวเตอร์ (พ.ร.บ.คอมพิวเตอร์ มาตรา 26)\n"
+              f"ส่งออกเมื่อ {manifest['generated_at']} โดย {session.get('username')}\n"
+              f"ช่วงเวลา {start} ถึง {end}\nเหตุผล/เลขที่หนังสือ: {reason}\n\n"
+              "ตรวจว่าไฟล์ไม่ถูกแก้ไข: คำนวณ SHA-256 ของไฟล์ .csv แต่ละไฟล์ (เช่น sha256sum <ไฟล์> หรือ\n"
+              "certutil -hashfile <ไฟล์> SHA256 บน Windows) แล้วเทียบกับค่าใน manifest.json\n"
+              "เลขบัตรประชาชนแสดงแบบปิดบางหลัก (natid_masked) ขอเลขเต็มได้จากผู้ดูแลระบบตามขั้นตอน\n")
+
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(conn_name, "\ufeff" + conn_csv)  # BOM ให้ Excel อ่านภาษาไทยถูก (hash คิดจากเนื้อหาไม่รวม BOM)
+        z.writestr(dns_name, "\ufeff" + dns_csv)
+        z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        z.writestr("README.txt", readme)
+    data = buf.getvalue()
+    zip_sha = hashlib.sha256(data).hexdigest()
+    target = f"evidence:customer:{customer['id']}" if customer else f"evidence:{mac or 'ALL'}"
+    audit.log_required(audit.EXPORT_LOG, staff_id=session["staff_id"], client_ip=g.client_ip,
+                       target=target,
+                       detail=(f"range={start:%Y-%m-%d %H:%M}..{end:%Y-%m-%d %H:%M} conn={len(conn_rows)} "
+                               f"dns={len(dns_rows)} zip_sha256={zip_sha} reason={reason[:200]}"))
+    resp = app.make_response(data)
+    resp.headers["Content-Type"] = "application/zip"
+    resp.headers["Content-Disposition"] = f"attachment; filename=evidence_{tag}_{stamp}.zip"
+    resp.headers["X-Evidence-SHA256"] = zip_sha
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 LOGS_CSV_MAX = 5000

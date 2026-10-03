@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}ส่งออกหลักฐาน{% endblock %}
+{% block body %}
+<div class="card">
+  <h1>ส่งออกหลักฐานให้เจ้าหน้าที่</h1>
+  <p class="hint">ใช้เมื่อได้รับหนังสือหรือคำสั่งจากเจ้าหน้าที่ตาม พ.ร.บ.คอมพิวเตอร์ มาตรา 26 —
+    ได้ไฟล์ ZIP มีข้อมูลการเชื่อมต่อ + เว็บที่เรียก (CSV) และค่า SHA-256 ไว้พิสูจน์ว่าไฟล์ไม่ถูกแก้ ·
+    ทุกการส่งออกถูกบันทึกใน audit log · เลขบัตรในไฟล์แสดงแบบปิดบางหลัก</p>
+
+  {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+
+  <form method="post" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>ข้อมูลของใคร</label>
+    <div style="display:flex;gap:1.25rem;flex-wrap:wrap">
+      {% for v, label in (('natid', 'ลูกค้า (เลขบัตร)'), ('mac', 'เครื่อง (MAC)'), ('all', 'ทุกเครื่อง (ไม่เกิน 7 วัน)')) %}
+      <label style="font-weight:400;margin:0"><input type="radio" name="who" value="{{ v }}" style="width:auto"
+             {{ 'checked' if form.who == v }} onchange="whoChanged()"> {{ label }}</label>
+      {% endfor %}
+    </div>
+    <div id="f-natid" style="margin-top:.5rem">
+      <label for="natid">เลขบัตรประชาชน 13 หลัก</label>
+      <input type="password" id="natid" name="natid" inputmode="numeric" maxlength="17" class="mono"
+             placeholder="ไม่ถูกเก็บ — ใช้ค้นหาเท่านั้น">
+    </div>
+    <div id="f-mac" style="margin-top:.5rem">
+      <label for="mac">MAC ของเครื่อง</label>
+      <input type="text" id="mac" name="mac" value="{{ form.mac }}" class="mono" placeholder="AA:BB:CC:DD:EE:FF">
+    </div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:.5rem">
+      <div><label for="start">ตั้งแต่วันที่</label><input type="date" id="start" name="start" value="{{ form.start }}" required></div>
+      <div><label for="end">ถึงวันที่ (รวมทั้งวัน)</label><input type="date" id="end" name="end" value="{{ form.end }}" required></div>
+    </div>
+    <label for="reason">เลขที่หนังสือ / คำสั่ง หรือเหตุผล</label>
+    <input type="text" id="reason" name="reason" value="{{ form.reason }}" required minlength="10"
+           placeholder="เช่น หนังสือ สภ.เมือง ที่ ตช 0000.00/1234 ลว. 1 ต.ค. 2569">
+    <p><button type="submit">ดาวน์โหลดไฟล์หลักฐาน (ZIP)</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>ประวัติการส่งออก (20 ครั้งล่าสุด)</h2>
+  {% if not history %}<p class="hint">ยังไม่เคยส่งออก</p>{% else %}
+  <div style="overflow-x:auto"><table>
+    <tr><th>เวลา</th><th>โดย</th><th>ของ</th><th>รายละเอียด</th></tr>
+    {% for h in history %}
+    <tr>
+      <td>{{ h.ts.strftime('%d/%m/%y %H:%M') }}</td>
+      <td>{{ h.username or '-' }}</td>
+      <td class="mono">{{ h.target.replace('evidence:', '') }}</td>
+      <td class="hint" style="word-break:break-all">{{ h.detail }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+</div>
+<script>
+  function whoChanged() {
+    var v = document.querySelector('input[name=who]:checked').value;
+    document.getElementById('f-natid').style.display = v === 'natid' ? '' : 'none';
+    document.getElementById('f-mac').style.display = v === 'mac' ? '' : 'none';
+  }
+  whoChanged();
+</script>
+{% endblock %}

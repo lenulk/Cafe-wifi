@@ -198,6 +198,11 @@ class FakeConn:
 
 @pytest.fixture
 def client(monkeypatch):
+    return make_client(monkeypatch)
+
+
+def make_client(monkeypatch):
+    """ใช้ร่วมกับ test_evidence_web.py (DB จำลองชุดเดียวกัน)"""
     _reset()
     import common.db as db
     monkeypatch.setattr(db, "get_conn", lambda: contextlib.nullcontext(FakeConn()))
