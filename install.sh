@@ -1334,12 +1334,20 @@ table inet filter {
 # จึงต้องไม่ให้สร้างรายการตั้งแต่แรก · ICMP ที่ Pi ยิงเองในวง uplink ไม่ใช่ข้อมูลจราจรของ
 # ลูกค้า จึงไม่ต้องบันทึกตาม ม.26 อยู่แล้ว
 table ip raw {
+  # N43 (2026-10-03): ทราฟฟิกภายในเครื่อง (loopback) ไม่ใช่ข้อมูลจราจรของลูกค้า แต่เดิมถูกติดตามทุก
+  # การเชื่อมต่อ -- ทุกบริการเปิด TCP ไป MariaDB 127.0.0.1:3306 ใหม่ทุก query (reconcile ทุก 5 วิ,
+  # ตัวเก็บ log, หน้าแอดมิน) วัดบน Pi ได้ 122 จาก 281 รายการในตาราง conntrack แต่ละตัวส่งเหตุการณ์
+  # NEW/DESTROY เข้าท่อเดียวกับที่ conn_collector อ่าน และหมดอายุพร้อมกันเป็นชุด (~250 รายการทุกนาที)
+  # = รูปแบบเดียวกับ N41 ที่ทำให้เกิด ENOBUFS · แพ็กเก็ต notrack มีสถานะ "untracked" ไม่ใช่ invalid
+  # จึงผ่าน ct state invalid drop ไปเข้า iif lo accept ใน chain input ได้ตามปกติ
   chain output {
     type filter hook output priority raw; policy accept;
+    oif "lo" notrack
     ip daddr \$UPLINK_NET icmp type echo-request notrack
   }
   chain prerouting {
     type filter hook prerouting priority raw; policy accept;
+    iif "lo" notrack
     ip saddr \$UPLINK_NET icmp type echo-reply notrack
   }
 }

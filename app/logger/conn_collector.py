@@ -342,6 +342,20 @@ def _drain_stderr(stream, on_event_loss=None) -> None:  # pragma: no cover (thre
             log.warning("conntrack: %s", line)
 
 
+def build_conntrack_cmd(client_network) -> list[str]:
+    """
+    R2-02: `id` ใช้จับคู่ NEW กับ DESTROY · ฟัง NEW ด้วยเพื่อจับ MAC ตอนเปิด connection
+
+    N43 (2026-10-03): `-s <วงลูกค้า>` ให้ conntrack ติดตัวกรอง BPF ที่ socket ในเคอร์เนล -- เหตุการณ์ที่
+    ไม่ได้เริ่มจากวงลูกค้า (DNS ขาออกของ dnsmasq ไป 1.1.1.1 ทุกครั้งที่ลูกค้าถาม, chrony, apt, ทดสอบ
+    ความเร็ว ฯลฯ) ถูกทิ้งตั้งแต่ในเคอร์เนล ไม่กินบัฟเฟอร์ netlink ที่ล้นจนเกิด ENOBUFS · วัดบน Pi
+    ได้ราวครึ่งหนึ่งของเหตุการณ์ทั้งหมด ซึ่ง parse_client_conntrack_event ทิ้งทีหลังอยู่แล้ว
+    (ทราฟฟิกลูกค้าที่ถูก NAT ยังมี original src เป็น 10.10.0.x จึงผ่านตัวกรองครบ)
+    """
+    return ["conntrack", "-E", "-o", "timestamp,extended,id", "-e", "NEW,DESTROY",
+            "-s", str(client_network), "--buffer-size", str(NETLINK_BUFFER_BYTES)]
+
+
 def _record_event_loss(detail: str, cooldown_seconds: int = 300,
                        _last: list[float] = []) -> None:  # pragma: no cover (ต้องมี DB)
     """บันทึกลง audit_log ว่ามีช่วงที่เก็บ log ได้ไม่ครบ -- หลักฐานความซื่อสัตย์ของระบบเอง
@@ -415,9 +429,7 @@ def run_forever(batch_size: int = 100, flush_interval: float = 5.0,
     overflow = [0]
     last_flush = time.time()
 
-    # R2-02: `id` ใช้จับคู่ NEW กับ DESTROY · ฟัง NEW ด้วยเพื่อจับ MAC ตอนเปิด connection
-    cmd = ["conntrack", "-E", "-o", "timestamp,extended,id", "-e", "NEW,DESTROY",
-           "--buffer-size", str(NETLINK_BUFFER_BYTES)]
+    cmd = build_conntrack_cmd(client_iface.network)
     log.info("เริ่ม conn_collector: %s", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     _enlarge_pipe(proc.stdout)

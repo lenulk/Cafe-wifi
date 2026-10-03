@@ -830,3 +830,13 @@ def test_parse_kernel_start_bracket_takes_precedence(monkeypatch):
     ev, rec = conn_collector.parse_conntrack_event(line)
     assert ev == "DESTROY" and rec.started_at == start and rec.ct_id == "7"
     assert rec.proto == "udp" and rec.dst_port == 53
+
+
+def test_conntrack_cmd_filters_client_network_in_kernel():
+    """N43: ทิ้งเหตุการณ์ที่ไม่ใช่ของวงลูกค้าตั้งแต่ในเคอร์เนล ไม่ให้กินบัฟเฟอร์จน ENOBUFS"""
+    import ipaddress
+    from logger.conn_collector import build_conntrack_cmd
+    cmd = build_conntrack_cmd(ipaddress.IPv4Interface("10.10.0.1/24").network)
+    assert cmd[:2] == ["conntrack", "-E"]
+    assert cmd[cmd.index("-s") + 1] == "10.10.0.0/24"
+    assert "NEW,DESTROY" in cmd and "--buffer-size" in cmd
