@@ -38,22 +38,11 @@
   .msg.ok{background:var(--ok-bg);color:var(--ok)}
   .hint{color:var(--muted);font-size:.8rem;text-align:center;margin-top:1rem;line-height:1.5}
   a{color:var(--accent)}
-  .staff{display:block;margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--line);text-align:center}
-  .staff a{display:inline-block;padding:.5rem 1rem;border:1px solid var(--line);border-radius:8px;
-           color:var(--muted);text-decoration:none;font-size:.88rem}
-  .staff a:hover{color:var(--accent);border-color:var(--accent)}
-  .staff small{display:block;color:var(--muted);font-size:.75rem;margin-top:.35rem}
 </style>
 {% block head %}{% endblock %}
 </head>
 <body>
-<div class="card">{% block body %}{% endblock %}
-{% block staff %}
-<div class="staff">
-  <a href="{{ admin_url }}" target="_blank" rel="noopener">🔒 เข้าสู่ระบบสำหรับแอดมินและพนักงาน</a>
-  <small>ถ้าเปิดไม่ขึ้นในหน้าต่างเล็กนี้ ให้เปิดเบราว์เซอร์ (Chrome/Safari) แล้วพิมพ์ {{ admin_url.split('/login')[0] }}</small>
-</div>
-{% endblock %}
-</div>
+{# 2026-10-03: เอาปุ่มเข้าหน้าแอดมินออกจากหน้าลูกค้า -- พนักงานพิมพ์ https://admin.cafe.wifi เอง #}
+<div class="card">{% block body %}{% endblock %}</div>
 </body>
 </html>

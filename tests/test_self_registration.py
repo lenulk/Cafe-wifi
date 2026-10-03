@@ -712,12 +712,11 @@ def test_dashboard_and_customers_show_data_usage(fas, admin, tmp_path, monkeypat
     assert "820.0 MB" in html
 
 
-def test_portal_has_staff_login_button(fas):
-    """ร้านจริง: พนักงานได้ IP วงลูกค้า -- หน้า portal ต้องมีทางไปหน้าแอดมิน"""
-    html = fas.get(_gw_url()).get_data(as_text=True)
-    assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in html
-    assert 'href="https://cafe.wifi:8443/login"' in html
-    assert "เข้าสู่ระบบสำหรับแอดมินและพนักงาน" in fas.get("/login").get_data(as_text=True), "หน้าแนะนำ cafe.wifi ด้วย"
+def test_portal_has_no_admin_entry(fas):
+    """2026-10-03: ไม่แสดงช่องทางเข้าหน้าแอดมินบนหน้าลูกค้า -- พนักงานพิมพ์ https://admin.cafe.wifi เอง"""
+    for page in (fas.get(_gw_url()), fas.get("/login"), fas.get("/policy")):
+        html = page.get_data(as_text=True)
+        assert "แอดมิน" not in html and "8443" not in html and "admin.cafe.wifi" not in html
 
 
 

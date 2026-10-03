@@ -665,7 +665,6 @@ gen_secrets() {
     for kv in "UPLINK_IP=${UPLINK_CIDR%%/*}" "UPLINK_GW=${UPLINK_GW}" \
               "UPLINK_NETWORK=$(cidr_to_network "$UPLINK_CIDR")" \
               "GATEWAY_IP=${CLIENT_CIDR%%/*}" "CLIENT_CIDR=${CLIENT_CIDR}" \
-              "ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login" \
               "OFFSITE_BACKUP_DIR=${BACKUP_USB_MNT}/${APP_NAME}" "OFFSITE_REQUIRE_SEPARATE_DEVICE=1" \
               "SSH_ALT_PORT=${SSH_ALT_PORT}"; do
       key="${kv%%=*}"
@@ -716,8 +715,6 @@ GATEWAY_NAME=${GATEWAY_NAME}
 GATEWAY_IP=${CLIENT_CIDR%%/*}
 CLIENT_CIDR=${CLIENT_CIDR}
 GATEWAY_AUTHDIR=opennds_auth
-# ปุ่ม "สำหรับแอดมิน/พนักงาน" บนหน้า portal -- ชื่อ cafe.wifi ชี้มาที่ Pi ผ่าน dnsmasq และอยู่ใน SAN ของใบรับรอง
-ADMIN_URL=https://cafe.wifi:${ADMIN_PORT}/login
 
 # N10 (CODING_BRIEF.md) -- bypass_detector.py (T17) ใช้ 3 ค่านี้เฝ้าวง uplink หา IP/MAC
 # แปลกปลอมที่ไม่ใช่ Pi เองหรือเราเตอร์ (ดู D19/§3.1.4) -- ก่อนหน้านี้ UPLINK_CIDR/UPLINK_GW
@@ -1292,6 +1289,8 @@ log-async=25
 
 # ให้ลูกค้าพิมพ์ cafe.wifi เข้าหน้า portal เองได้เมื่อ captive detection ไม่เด้ง
 address=/cafe.wifi/${client_ip}
+# หน้าแอดมิน/พนักงาน: https://admin.cafe.wifi (address=/cafe.wifi/ ครอบชื่อย่อยอยู่แล้ว ใส่ไว้ให้เห็นชัด)
+address=/admin.cafe.wifi/${client_ip}
 DNSMASQ
 
   run_sh "touch '${LOG_DIR}/dnsmasq.log'"
@@ -1373,6 +1372,8 @@ table inet filter {
     # และต่อชื่อผู้ใช้ (admin/app.py) + audit ทุกครั้งที่ login ไม่ผ่าน · ลูกค้าเปิด https://cafe.wifi:8443 เห็น
     # หน้า login ได้ (ความเสี่ยงที่ยอมรับ)
     ip saddr \$CLIENT_NET tcp dport ${ADMIN_PORT} accept
+    # https://admin.cafe.wifi (พอร์ต 443 ปกติ -- nginx ส่งต่อไปหน้าแอดมิน)
+    ip saddr \$CLIENT_NET tcp dport 443 accept
     # SSH จากวงลูกค้า: เฉพาะพอร์ตที่สุ่มไว้ (configure_ssh -- sshd บังคับ SSH key บนพอร์ตนี้) + จำกัดการเชื่อมต่อใหม่
     # กันสแกน/เดาถี่ ๆ · พอร์ต 22 จากวงลูกค้ายังห้ามเหมือนเดิม
     ip saddr \$CLIENT_NET tcp dport ${SSH_ALT_PORT} ct state new limit rate 6/minute burst 6 packets accept
@@ -1381,6 +1382,7 @@ table inet filter {
 
     # จากฝั่งเราเตอร์/อัพลิงก์ (คนละ source กับ CLIENT_NET) อนุญาต SSH + Admin ตามปกติ
     tcp dport ${ADMIN_PORT} accept
+    tcp dport 443 accept
     tcp dport 22 accept
     tcp dport ${SSH_ALT_PORT} accept
   }
@@ -1706,6 +1708,7 @@ config opennds
 	list users_to_router 'allow tcp port 53'
 	list users_to_router 'allow udp port 67'
 	list users_to_router 'allow tcp port 22'
+	# 443 = หน้าแอดมิน https://admin.cafe.wifi (nginx)
 	list users_to_router 'allow tcp port 443'
 	# หมายเหตุ: ไม่ต้องใส่พอร์ต 80 -- openNDS มีกฎ nat ตายตัว "ip daddr <gateway> tcp dport 80 redirect to
 	# :gatewayport" ส่งทุกคำขอพอร์ต 80 ไปหน้าของ openNDS เองเสมอ (พบบน Pi 2026-10-03) ลูกค้าดูเวลาที่เหลือ
@@ -1999,11 +2002,17 @@ configure_nginx() {
   local lan_ip="${CLIENT_CIDR%%/*}" cert="${ETC_DIR}/tls"  # IP ฝั่งลูกค้า -- cert ครอบคลุม cafe.wifi ที่ลูกค้าเห็น
   run install -d -m 0750 -o root -g "$APP_USER" "$cert"
 
+  # ใบเดิมที่ยังไม่มีชื่อ admin.cafe.wifi (ก่อน 2026-10-03) ต้องออกใหม่ ไม่งั้นเบราว์เซอร์ฟ้องชื่อไม่ตรงทุกครั้ง
+  if [[ -f "${cert}/server.crt" ]] && (( ! DRY_RUN )) \
+     && ! openssl x509 -in "${cert}/server.crt" -noout -ext subjectAltName 2>/dev/null | grep -q "admin.cafe.wifi"; then
+    info "ใบรับรองเดิมไม่มีชื่อ admin.cafe.wifi — ออกใหม่ (เบราว์เซอร์จะเตือนใบรับรองใหม่อีกครั้งหนึ่ง)"
+    mv -f "${cert}/server.crt" "${cert}/server.crt.old"; mv -f "${cert}/server.key" "${cert}/server.key.old"
+  fi
   if [[ ! -f "${cert}/server.crt" ]] && (( ! DRY_RUN )); then
     openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
       -keyout "${cert}/server.key" -out "${cert}/server.crt" \
-      -subj "/C=TH/O=Cafe WiFi Gateway/CN=cafe.wifi" \
-      -addext "subjectAltName=DNS:cafe.wifi,DNS:localhost,IP:${lan_ip}" >/dev/null 2>&1
+      -subj "/C=TH/O=Cafe WiFi Gateway/CN=admin.cafe.wifi" \
+      -addext "subjectAltName=DNS:admin.cafe.wifi,DNS:cafe.wifi,DNS:localhost,IP:${lan_ip}" >/dev/null 2>&1
     chmod 0640 "${cert}/server.key"; chown root:"$APP_USER" "${cert}/server.key"
     ok "สร้าง self-signed certificate (825 วัน)"
   fi
@@ -2031,9 +2040,13 @@ server {
 }
 
 # ---- Admin Panel (HTTPS เท่านั้น) ----
+# พนักงานพิมพ์ https://admin.cafe.wifi (พอร์ต 443 ปกติ ไม่ต้องจำพอร์ต -- dnsmasq ชี้ชื่อนี้มาที่ Pi) · ${ADMIN_PORT}
+# ยังใช้ได้เหมือนเดิม (ทางสำรอง/เข้าจากวงเราเตอร์) · http://admin.cafe.wifi ใช้ไม่ได้: openNDS ส่งทุกคำขอพอร์ต 80
+# ที่มาหา gateway ไปหน้าของตัวเองเสมอ ต้องพิมพ์ https:// เอง
 server {
+    listen 443 ssl;
     listen ${ADMIN_PORT} ssl;
-    server_name cafe.wifi _;
+    server_name admin.cafe.wifi cafe.wifi _;
 
     ssl_certificate     ${ETC_DIR}/tls/server.crt;
     ssl_certificate_key ${ETC_DIR}/tls/server.key;
@@ -2203,6 +2216,7 @@ final_summary() {
   printf '  %sหน้า /setup จะปิดตัวเองถาวรทันทีที่สร้างบัญชีแรกสำเร็จ%s\n' "$C_DIM" "$C_RST"
   printf '  %sและไฟล์ %s/setup.token จะถูกลบอัตโนมัติ%s\n\n' "$C_DIM" "$ETC_DIR" "$C_RST"
 
+  printf '  หน้าแอดมิน/พนักงาน (ต่อ Wi-Fi ร้าน): %shttps://admin.cafe.wifi%s  (ต้องพิมพ์ https:// เอง)\n\n' "$C_BLU" "$C_RST"
   printf '  SSH จากวงลูกค้า (ช่างที่ต่อ Wi-Fi ร้าน): %sssh -p %s <user>@10.10.0.1%s  — ใช้ SSH key เท่านั้น\n\n' \
     "$C_BLU" "$SSH_ALT_PORT" "$C_RST"
   printf '  ------------------------------------------------------------\n'

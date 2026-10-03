@@ -51,8 +51,6 @@ GATEWAY_NAME = os.environ.get("GATEWAY_NAME", "Cafe-Guest")
 GATEWAY_IP = os.environ.get("GATEWAY_IP", "10.10.0.1")
 GATEWAY_AUTHDIR = os.environ.get("GATEWAY_AUTHDIR", "opennds_auth")
 NDS_PORT = os.environ.get("NDS_PORT", "2050")
-# พนักงานต่อ Wi-Fi ร้านได้ IP วงลูกค้าเหมือนทุกคน (ร้านจริงมีแค่เราเตอร์ + Pi) -- หน้า portal จึงมีปุ่มไปหน้าแอดมิน
-ADMIN_URL = os.environ.get("ADMIN_URL", "https://cafe.wifi:8443/login")
 MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 _attempts: dict[str, list[float]] = {}
@@ -121,7 +119,7 @@ def _valid_gateway(ctx: ClientContext) -> bool:
 
 @app.context_processor
 def inject_globals():
-    return {"gateway_name": GATEWAY_NAME, "admin_url": ADMIN_URL}
+    return {"gateway_name": GATEWAY_NAME}
 
 
 @app.get("/health")
