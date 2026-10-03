@@ -799,3 +799,18 @@ def test_extend_rejects_bad_minutes_and_dead_vouchers(fas, admin):
     before = v["valid_until"]
     admin.post(f"/vouchers/{v['id']}/extend", data=dict(minutes="60"))
     assert v["valid_until"] == before and not v.get("auth_sync_needed")
+
+
+# ================================================================ เลขบัตร: ตัวเลข 13 หลักเท่านั้น
+@pytest.mark.parametrize("bad", ["1-1017-00000-01-0", "1101 7000 0001 0", "110170000001", "11017000000100",
+                                 "110170000001a", " "])
+def test_natid_must_be_exactly_13_digits(fas, bad):
+    r = _register(fas, natid=bad)
+    assert r.status_code == 400 and DB["access_request"] == []
+    assert "ตัวเลข 13 หลักเท่านั้น" in r.get_data(as_text=True)
+
+
+def test_natid_field_restricts_input_in_browser(fas):
+    html = fas.get(_gw_url()).get_data(as_text=True)
+    assert 'pattern="[0-9]{13}"' in html and 'maxlength="13"' in html and 'minlength="13"' in html
+    assert "replace(/\D/g, '')" in html and "0/13" in html

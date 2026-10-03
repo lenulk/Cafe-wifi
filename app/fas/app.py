@@ -205,7 +205,14 @@ def login():
                                error="ต้องอ่านและยอมรับนโยบายความเป็นส่วนตัวก่อนขอใช้งาน"), 400
     # เลขบัตรเต็มเดินทางมาบน HTTP (ความเสี่ยงที่เจ้าของโครงงานยอมรับ -- sql/010) ฝั่งนี้จึงห้ามมีร่องรอย
     # เลขเต็มที่ไหนอีก: ไม่ลง log/audit ไม่ส่งกลับไปในหน้า error ไม่เก็บแบบอ่านออก
-    nid = crypto.normalize_natid(request.form.get("natid", ""))
+    # ตัวเลข 13 หลักล้วนเท่านั้น (2026-10-03) -- เดิมยอมให้มีขีด/เว้นวรรคแล้วตัดทิ้ง หน้าเว็บบังคับแล้วแต่ต้อง
+    # ตรวจซ้ำที่นี่ เพราะส่งฟอร์มตรง ๆ โดยไม่ผ่านหน้าเว็บได้
+    raw = (request.form.get("natid") or "").strip()
+    if not re.fullmatch(r"\d{13}", raw):
+        record_attempt(bucket)
+        return render_template("register.html", nonce=nonce,
+                               error="กรอกเลขบัตรประชาชนเป็นตัวเลข 13 หลักเท่านั้น (ไม่ต้องใส่ขีดหรือเว้นวรรค)"), 400
+    nid = raw
     if not crypto.valid_thai_id(nid):
         record_attempt(bucket)
         return render_template("register.html", nonce=nonce,

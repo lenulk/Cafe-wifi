@@ -13,13 +13,14 @@
   {# type=password: กันคนข้าง ๆ มองเห็นเลขบนจอ · autocomplete=off: ไม่ให้เบราว์เซอร์จำเลขบัตรไว้ #}
   <div style="position:relative">
     <input type="password" id="natid" name="natid" required autofocus
-           inputmode="numeric" pattern="[0-9 -]{13,17}" maxlength="17" autocomplete="off"
-           placeholder="ตัวเลข 13 หลัก" style="padding-right:4.5rem">
+           inputmode="numeric" pattern="[0-9]{13}" minlength="13" maxlength="13" autocomplete="off"
+           title="ตัวเลข 13 หลักเท่านั้น" placeholder="ตัวเลข 13 หลัก" style="padding-right:4.5rem">
     <button type="button" id="natid-toggle" aria-controls="natid" aria-pressed="false"
             style="position:absolute;right:.35rem;top:50%;transform:translateY(-50%);width:auto;margin:0;
                    padding:.3rem .7rem;font-size:.85rem;background:transparent;color:var(--accent);
                    border:1px solid var(--line)">แสดง</button>
   </div>
+  <div id="natid-count" class="hint" style="text-align:right;margin-top:.3rem">0/13</div>
 
   <label style="display:flex;gap:.5rem;align-items:flex-start;font-weight:400">
     <input type="checkbox" name="consent" required style="margin-top:.2rem">
@@ -34,6 +35,14 @@
   // เปิดดูเลขที่พิมพ์ไว้เพื่อตรวจก่อนส่ง แล้วซ่อนกลับได้ (ค่าเริ่มต้นซ่อน กันคนข้าง ๆ มองเห็น)
   (function () {
     var input = document.getElementById('natid'), btn = document.getElementById('natid-toggle');
+    var count = document.getElementById('natid-count');
+    // พิมพ์/วางได้เฉพาะตัวเลข ตัดที่เกิน 13 หลักทิ้งทันที (วางเลขที่มีขีดมาก็ใช้ได้)
+    input.addEventListener('input', function () {
+      var digits = input.value.replace(/\D/g, '').slice(0, 13);
+      if (digits !== input.value) input.value = digits;
+      count.textContent = digits.length + '/13';
+      count.style.color = digits.length === 13 ? 'var(--ok)' : '';
+    });
     btn.addEventListener('click', function () {
       var show = input.type === 'password';
       input.type = show ? 'text' : 'password';
