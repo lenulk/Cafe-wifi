@@ -15,3 +15,4 @@
 - [Two-machine workflow](two-machine-workflow.md) — โน้ตบุ๊ก = ทดลองกับของจริง, เดสก์ท็อป = ทำเอกสารอย่างเดียว; หลักฐานไหลทางเดียวผ่าน git (memory/, docs/, ข้อมูลทดสอบ/) ส่วนไฟล์เล่มต้องหิ้วเอง
 - ["pull" means push](user-says-pull-means-push.md) — "pullเลย" after a push offer = push to origin lenulk; fetch first
 - [Admin reachable from customer LAN](admin-access-from-customer-lan.md) — option B; openNDS users_to_router must include ADMIN_PORT (replaces defaults)
+- [⏰ REMIND: service Wi-Fi + SSH hardening](pending-service-wifi-reminder.md) — user asked to be reminded; before shop handover: technician hotspot on wlan0, change ras pw 1234, remove NetworkLab
