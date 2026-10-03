@@ -27,7 +27,10 @@ routes = Routes()
 @core.login_required
 def customers():
     q = (request.args.get("q") or "").strip()
-    if q and crypto.valid_thai_id(q):
+    error = None
+    if q and not crypto.valid_thai_id(q):
+        error = "เลขบัตรประชาชนไม่ถูกต้อง (ต้องเป็นตัวเลข 13 หลัก และ checksum ถูก) — แสดงลูกค้าทั้งหมดแทน"
+    if q and not error:
         rows = core.query_all(
             "SELECT id, natid_masked, first_seen, last_seen, visit_count, is_blocked "
             "FROM customer WHERE natid_hash = %s", (crypto.natid_hash(q),))
@@ -40,7 +43,12 @@ def customers():
     for r in rows:
         r["devices"] = devices.get(r["id"], [])
         r["usage"] = usage.get(r["id"], dict(down=0, up=0, total=0))
-    return render_template("customers.html", rows=rows, q=q)
+        r["online"] = any(d.get("online") for d in r["devices"])
+        r["state"] = ("purged" if r["natid_masked"] == PURGED_MARK else "blocked" if r["is_blocked"]
+                      else "online" if r["online"] else "normal")
+    counts = {k: sum(r["state"] == k for r in rows) for k in ("online", "blocked", "normal", "purged")}
+    return render_template("customers.html", rows=rows, q=q if not error else "", error=error,
+                           counts=counts, now=datetime.now())
 
 
 @routes.post("/customers/<int:cid>/reveal")
