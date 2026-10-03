@@ -101,6 +101,8 @@ class _FakeCursor:
             self.rowcount = 0
         elif s.startswith("delete from access_request where created_at < %s"):
             self.rowcount = 4
+        elif s.startswith("delete from rate_attempt where ts <"):
+            self.rowcount = 0
         elif s.startswith(("update portal_session ps join voucher", "update access_request ar join voucher")):
             self.rowcount = 1
         elif s.startswith("select c.id from customer"):

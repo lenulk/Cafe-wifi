@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
 
-from common import access, audit, crypto, device_info, sysinfo, traffic
+from common import access, audit, crypto, device_info, ratelimit, sysinfo, traffic
 from common.customer import PURGED_MARK, anonymize_customer, retention_hold_until
 from common.db import execute, get_conn, query_all, query_one
 from common.log_mapping import conn_mapping_join, dns_mapping_join
@@ -93,14 +93,11 @@ def client_ip() -> str:
 
 
 def rate_limited(bucket: str, limit: int = MAX_ATTEMPTS) -> bool:
-    now = time.time()
-    hits = [t for t in _attempts.get(bucket, []) if now - t < WINDOW_SEC]
-    _attempts[bucket] = hits
-    return len(hits) >= limit
+    return ratelimit.limited(bucket, limit, WINDOW_SEC, _attempts)  # เก็บในฐานข้อมูล (sql/013)
 
 
 def record_attempt(bucket: str) -> None:
-    _attempts.setdefault(bucket, []).append(time.time())
+    ratelimit.hit(bucket, WINDOW_SEC, _attempts)
 
 
 def staff_count() -> int:

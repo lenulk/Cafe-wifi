@@ -133,6 +133,7 @@ def run(retention_days: int | None = None, customer_retention_days: int | None =
         # คำขอใช้งานเก่า (มี natid_masked/ชื่อเครื่อง/User-Agent) -- เก็บเท่าอายุ log พอ
         # ร่องรอยการอนุมัติยังอยู่ใน audit_log
         n_req = _exec("DELETE FROM access_request WHERE created_at < %s", (log_cutoff,))
+        _exec("DELETE FROM rate_attempt WHERE ts < NOW() - INTERVAL 1 DAY", ())
 
     summary = PurgeSummary(conn_log_deleted=n_conn, dns_log_deleted=n_dns,
                            customers_deleted=n_cust, cutoff_logs=log_cutoff,

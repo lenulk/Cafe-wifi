@@ -841,6 +841,15 @@ SQL
     die "ไม่พบ sql/010_access_request.sql — portal และหน้าอนุมัติต้องใช้ตารางนี้"
   fi
 
+  # ตัวนับการเดารหัส/กรอกผิดซ้ำ เก็บในฐานข้อมูล (รีสตาร์ทแล้วไม่หาย)
+  local rate="${SCRIPT_DIR}/sql/013_rate_attempt.sql"
+  if [[ -f "$rate" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${rate}'"
+    ok "สร้างตารางตัวนับการเดารหัสแล้ว"
+  else
+    die "ไม่พบ sql/013_rate_attempt.sql — หน้า login ต้องใช้ตารางนี้"
+  fi
+
   # ปุ่มต่อเวลา: ธงให้ cafe-reconcile ต่อเวลาที่ openNDS
   local extend="${SCRIPT_DIR}/sql/012_voucher_extend.sql"
   if [[ -f "$extend" ]]; then

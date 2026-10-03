@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask, abort, redirect, render_template, request
 
-from common import access, audit, crypto, device_info, traffic
+from common import access, audit, crypto, device_info, ratelimit, traffic
 from common.db import execute, get_conn, query_one
 from logger.netutil import resolve_mac
 from .opennds_proto import ClientContext, FasProtocolError, decrypt_fas_payload
@@ -61,14 +61,11 @@ WINDOW_SEC = 600
 
 
 def rate_limited(bucket: str) -> bool:
-    now = time.time()
-    hits = [t for t in _attempts.get(bucket, []) if now - t < WINDOW_SEC]
-    _attempts[bucket] = hits
-    return len(hits) >= MAX_ATTEMPTS
+    return ratelimit.limited(bucket, MAX_ATTEMPTS, WINDOW_SEC, _attempts)  # เก็บในฐานข้อมูล (sql/013)
 
 
 def record_attempt(bucket: str) -> None:
-    _attempts.setdefault(bucket, []).append(time.time())
+    ratelimit.hit(bucket, WINDOW_SEC, _attempts)
 
 
 def client_ip() -> str:
