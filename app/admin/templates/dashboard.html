@@ -91,6 +91,14 @@
       </td>
       <td>{{ r.issued_by }}</td>
       <td>
+        {% if live %}
+        <form method="post" action="{{ url_for('extend_voucher', vid=r.id) }}"
+              style="display:flex;gap:.3rem;margin-bottom:.35rem">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="ghost" type="submit" name="minutes" value="60" title="ต่อเวลา 1 ชั่วโมง">+1 ชม.</button>
+          <button class="ghost" type="submit" name="minutes" value="30" title="ต่อเวลา 30 นาที">+30 น.</button>
+        </form>
+        {% endif %}
         {% if r.status == 'active' %}
         <form method="post" action="{{ url_for('revoke_voucher', vid=r.id) }}"
               onsubmit="return confirm('ปิดสิทธิ์ของลูกค้า {{ r.natid_masked }} ใช่ไหม? ทุกเครื่องในสิทธิ์นี้จะหลุดจากเน็ตภายใน 5 นาที

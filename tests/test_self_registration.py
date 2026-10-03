@@ -148,6 +148,11 @@ class FakeCursor:
             self.lastrowid = len(vou)
         elif s.startswith("select id, username, max_devices, status, valid_until from voucher"):
             self._rows = [v for v in vou if v["id"] == args[0]]
+        elif s.startswith("select id, status, valid_until from voucher where id=%s for update"):
+            self._rows = [v for v in vou if v["id"] == args[0]]
+        elif s.startswith("update voucher set valid_until=%s, auth_sync_needed=1"):
+            v = next(v for v in vou if v["id"] == args[1])
+            v.update(valid_until=args[0], auth_sync_needed=1)
         elif s.startswith("update voucher set max_devices"):
             next(v for v in vou if v["id"] == args[1])["max_devices"] = args[0]
         elif s.startswith("select count(*) as n from device where voucher_id"):
@@ -769,3 +774,27 @@ def test_reconnected_device_uses_latest_session(fas, admin):
     DB["portal_session"].append(dict(sess, id=2, state="authenticated", ended_at=None, terminate_cause=None))
     html = fas.get("/request").get_data(as_text=True)
     assert "เวลาที่เหลือ" in html and "หลุด" not in html
+
+
+
+# ================================================================ ปุ่มต่อเวลา
+def test_extend_voucher_adds_time_flags_gateway_sync_and_audits(fas, admin):
+    _register(fas)
+    _approve(admin, hours="1")
+    v = DB["voucher"][0]
+    before = v["valid_until"]
+    r = admin.post(f"/vouchers/{v['id']}/extend", data=dict(minutes="60"))
+    assert r.status_code == 302
+    assert v["valid_until"] - before == timedelta(minutes=60) and v["auth_sync_needed"] == 1
+    assert any(a[1] == "voucher_extend" and "+60min" in a[4] for a in DB["audit"])
+
+
+def test_extend_rejects_bad_minutes_and_dead_vouchers(fas, admin):
+    _register(fas)
+    _approve(admin, hours="1")
+    v = DB["voucher"][0]
+    assert admin.post(f"/vouchers/{v['id']}/extend", data=dict(minutes="999")).status_code == 400
+    v["status"] = "revoked"
+    before = v["valid_until"]
+    admin.post(f"/vouchers/{v['id']}/extend", data=dict(minutes="60"))
+    assert v["valid_until"] == before and not v.get("auth_sync_needed")

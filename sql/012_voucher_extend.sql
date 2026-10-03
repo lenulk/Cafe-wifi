@@ -1,0 +1,11 @@
+-- ============================================================================
+--  012_voucher_extend.sql — ปุ่มต่อเวลาบนแดชบอร์ด
+--  MariaDB 10.6+ / 11.x
+-- ============================================================================
+-- ตอนอนุมัติ cafe-reconcile สั่ง `ndsctl auth <mac> <นาทีที่เหลือ>` openNDS จึงตัดเครื่องตามเวลาเดิมเอง
+-- ต่อเวลาแค่ใน voucher.valid_until ไม่พอ และ openNDS 10.1.3 ไม่ยอม `auth` เครื่องที่ออนไลน์อยู่ซ้ำ
+-- (ตอบ "Failed to authenticate") -- Admin (รันเป็น cafewifi เรียก ndsctl ไม่ได้) จึงตั้งธงนี้ไว้ แล้ว
+-- cafe-reconcile (root, ทุก 5 วิ) สั่ง deauth + auth ด้วยนาทีใหม่ให้ทุกเครื่องที่ออนไลน์ในสิทธิ์นั้น
+--
+-- รันซ้ำได้เสมอ
+ALTER TABLE voucher ADD COLUMN IF NOT EXISTS auth_sync_needed BOOLEAN NOT NULL DEFAULT FALSE;

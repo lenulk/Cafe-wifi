@@ -111,9 +111,49 @@ def authorize_approved() -> int:
     return sent
 
 
+def sync_extended() -> int:
+    """ปุ่มต่อเวลาในแดชบอร์ด -> ให้ openNDS ตัดตามเวลาใหม่ (sql/012_voucher_extend.sql)
+
+    openNDS 10.1.3 ไม่มีคำสั่งแก้เวลาของเครื่องที่ออนไลน์อยู่ และ `auth` ซ้ำไม่ได้ -- ต้อง deauth แล้ว auth
+    ทันทีด้วยนาทีที่เหลือใหม่ (วัดบน Pi: เน็ตใช้ได้ต่อ, session ในฐานข้อมูลเป็นแถวเดิม log ต่อเนื่อง)
+    ล้างธงเมื่อทำครบทุกเครื่อง ถ้าบางเครื่องไม่สำเร็จคงธงไว้ให้รอบถัดไป (5 วิ) ลองใหม่
+    """
+    from tools.enforce_voucher_expiry import run_ndsctl
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT v.id, v.status, v.valid_until FROM voucher v WHERE v.auth_sync_needed = 1")
+        vouchers = cur.fetchall()
+        sessions = {}
+        for v in vouchers:
+            cur.execute("SELECT mac FROM portal_session WHERE voucher_id=%s AND state='authenticated' "
+                        "AND ended_at IS NULL", (v["id"],))
+            sessions[v["id"]] = [r["mac"] for r in cur.fetchall()]
+    done = 0
+    for v in vouchers:
+        ok = True
+        if v["status"] == "active" and v["valid_until"] > datetime.now():
+            minutes = max(1, math.ceil((v["valid_until"] - datetime.now()).total_seconds() / 60))
+            for mac in sessions[v["id"]]:
+                try:
+                    run_ndsctl(["ndsctl", "deauth", mac.lower()])
+                    res = run_ndsctl(["ndsctl", "auth", mac.lower(), str(minutes)])
+                except (OSError, subprocess.SubprocessError) as exc:
+                    log.error("ต่อเวลา %s ที่ openNDS ล้มเหลว: %s", mac, exc)
+                    ok = False
+                    continue
+                if res.returncode != 0:
+                    log.error("ต่อเวลา %s ที่ openNDS ไม่สำเร็จ (exit %d)", mac, res.returncode)
+                    ok = False
+        if ok:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute("UPDATE voucher SET auth_sync_needed=0 WHERE id=%s", (v["id"],))
+            done += 1
+    return done
+
+
 def run() -> tuple[int, int]:
     expire_requests()
     authorize_approved()
+    sync_extended()
     # ถาม openNDS เฉพาะเมื่อมี pending จริง (ส่วนใหญ่ของเวลาไม่มี) -- ไม่ยึด ndsctl ไว้ทุก 5 วิโดยเปล่า
     # ประโยชน์ และอ่านนอก transaction เพื่อไม่ถือ lock ของ portal_session ไว้ระหว่างรอ ndsctl
     with get_conn() as conn, conn.cursor() as cur:

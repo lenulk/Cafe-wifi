@@ -51,6 +51,7 @@ def _no_request_steps(monkeypatch):
     """เทสต์ชุดเดิมดูแค่การยืนยัน pending -- ขั้นคำขอใช้งานมีเทสต์ของตัวเองท้ายไฟล์"""
     monkeypatch.setattr(rp, "authorize_approved", lambda: 0)
     monkeypatch.setattr(rp, "expire_requests", lambda: 0)
+    monkeypatch.setattr(rp, "sync_extended", lambda: 0)
 
 
 class _FakeConn:
@@ -222,6 +223,9 @@ class _AuthCursor:
         return False
 
 
+ORIG_SYNC = rp.sync_extended
+
+
 def _auth_env(monkeypatch, rows, returncode=0):
     import tools.enforce_voucher_expiry as enforce
     cur = _AuthCursor(rows)
@@ -272,3 +276,71 @@ def test_expire_requests_clears_pii(monkeypatch):
     assert ORIG_EXPIRE() == 2
     (sql, _), = cur.executed
     assert "status='expired'" in sql and "natid_hash=NULL" in sql and "natid_enc=NULL" in sql
+
+
+
+# ---------------------------------------------------------------- ปุ่มต่อเวลา (sql/012)
+class _SyncCursor:
+    def __init__(self, vouchers, macs):
+        self.vouchers, self.macs, self.executed, self._rows = vouchers, macs, [], []
+        self.rowcount = 0
+
+    def execute(self, sql, args=()):
+        self.executed.append((sql, args))
+        s = sql.lower()
+        if "from voucher v where v.auth_sync_needed" in s:
+            self._rows = self.vouchers
+        elif "from portal_session where voucher_id" in s:
+            self._rows = [dict(mac=m) for m in self.macs.get(args[0], [])]
+        else:
+            self._rows = []
+
+    def fetchall(self):
+        return self._rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _sync_env(monkeypatch, vouchers, macs, returncode=0):
+    import tools.enforce_voucher_expiry as enforce
+    cur = _SyncCursor(vouchers, macs)
+    calls = []
+
+    class R:
+        stdout = b""
+
+    def fake(cmd, timeout=10):
+        calls.append(cmd)
+        r = R()
+        r.returncode = returncode
+        return r
+    monkeypatch.setattr(rp, "get_conn", lambda: _FakeConn(cur))
+    monkeypatch.setattr(enforce, "run_ndsctl", fake)
+    return cur, calls
+
+
+def test_sync_extended_reauths_every_online_device_with_new_minutes(monkeypatch):
+    """openNDS ไม่ยอม auth เครื่องที่ออนไลน์ซ้ำ -- ต้อง deauth แล้ว auth ด้วยนาทีใหม่ แล้วล้างธง"""
+    v = dict(id=9, status="active", valid_until=datetime.now() + timedelta(minutes=119, seconds=30))
+    cur, calls = _sync_env(monkeypatch, [v], {9: ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"]})
+    assert ORIG_SYNC() == 1
+    assert calls == [["ndsctl", "deauth", "aa:bb:cc:dd:ee:01"], ["ndsctl", "auth", "aa:bb:cc:dd:ee:01", "120"],
+                     ["ndsctl", "deauth", "aa:bb:cc:dd:ee:02"], ["ndsctl", "auth", "aa:bb:cc:dd:ee:02", "120"]]
+    assert any("auth_sync_needed=0" in s and a == (9,) for s, a in cur.executed)
+
+
+def test_sync_extended_keeps_flag_when_ndsctl_fails(monkeypatch):
+    v = dict(id=9, status="active", valid_until=datetime.now() + timedelta(hours=1))
+    cur, calls = _sync_env(monkeypatch, [v], {9: ["AA:BB:CC:DD:EE:01"]}, returncode=1)
+    assert ORIG_SYNC() == 0
+    assert not any("auth_sync_needed=0" in s for s, _ in cur.executed), "รอบถัดไปต้องลองใหม่"
+
+
+def test_sync_extended_clears_flag_of_dead_voucher_without_touching_gateway(monkeypatch):
+    v = dict(id=9, status="revoked", valid_until=datetime.now() + timedelta(hours=1))
+    cur, calls = _sync_env(monkeypatch, [v], {9: ["AA:BB:CC:DD:EE:01"]})
+    assert ORIG_SYNC() == 1 and calls == []

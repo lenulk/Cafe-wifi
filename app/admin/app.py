@@ -834,6 +834,33 @@ def approve_request(rid: int):
 
 
 MAX_DEVICES_PER_VOUCHER = 5
+EXTEND_CHOICES_MIN = (30, 60, 120)
+
+
+@app.post("/vouchers/<int:vid>/extend")
+@login_required
+def extend_voucher(vid: int):
+    """ต่อเวลาสิทธิ์ที่ยังใช้ได้ -- ลูกค้าขอนั่งต่อ ไม่ต้องขอใช้งานใหม่ · เครื่องที่ออนไลน์อยู่ได้เวลาใหม่ที่
+    openNDS ภายใน ~5 วินาที (cafe-reconcile เห็น auth_sync_needed แล้วสั่ง deauth+auth ด้วยนาทีใหม่)"""
+    try:
+        minutes = int(request.form.get("minutes", "60"))
+    except ValueError:
+        minutes = 0
+    if minutes not in EXTEND_CHOICES_MIN:
+        abort(400, "ต่อเวลาได้ 30, 60 หรือ 120 นาที")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, status, valid_until FROM voucher WHERE id=%s FOR UPDATE", (vid,))
+        v = cur.fetchone()
+        if not v or v["status"] != "active" or v["valid_until"] <= datetime.now():
+            flash("ต่อเวลาได้เฉพาะสิทธิ์ที่ยังใช้งานได้ — สิทธิ์ที่หมดแล้วให้ลูกค้าขอใช้งานใหม่", "err")
+            return redirect(safe_next(request.form.get("next")) or url_for("dashboard"))
+        new_until = v["valid_until"] + timedelta(minutes=minutes)
+        cur.execute("UPDATE voucher SET valid_until=%s, auth_sync_needed=1 WHERE id=%s", (new_until, vid))
+        audit.log_required(audit.VOUCHER_EXTEND, staff_id=session["staff_id"], target=f"voucher:{vid}",
+                           client_ip=g.client_ip,
+                           detail=f"+{minutes}min {v['valid_until']:%H:%M}->{new_until:%H:%M}", cursor=cur)
+    flash(f"ต่อเวลาแล้ว +{minutes} นาที — ใช้ได้ถึง {new_until:%H:%M} น.", "success")
+    return redirect(safe_next(request.form.get("next")) or url_for("dashboard"))
 
 
 @app.post("/vouchers/<int:vid>/devices")

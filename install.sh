@@ -841,6 +841,15 @@ SQL
     die "ไม่พบ sql/010_access_request.sql — portal และหน้าอนุมัติต้องใช้ตารางนี้"
   fi
 
+  # ปุ่มต่อเวลา: ธงให้ cafe-reconcile ต่อเวลาที่ openNDS
+  local extend="${SCRIPT_DIR}/sql/012_voucher_extend.sql"
+  if [[ -f "$extend" ]]; then
+    run_sh "mysql '${DB_NAME}' < '${extend}'"
+    ok "เพิ่มคอลัมน์สำหรับต่อเวลาแล้ว"
+  else
+    die "ไม่พบ sql/012_voucher_extend.sql — ปุ่มต่อเวลาต้องใช้คอลัมน์ในไฟล์นี้"
+  fi
+
   # ชื่อเครื่อง + ระบบปฏิบัติการของลูกค้า
   local devinfo="${SCRIPT_DIR}/sql/011_device_info.sql"
   if [[ -f "$devinfo" ]]; then

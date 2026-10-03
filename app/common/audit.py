@@ -39,6 +39,7 @@ ACCESS_REQUEST = "access_request"
 REQUEST_APPROVE = "request_approve"
 REQUEST_REJECT = "request_reject"
 REQUEST_MISMATCH = "request_mismatch"  # 4 ตัวท้ายบนบัตรไม่ตรงกับที่ลูกค้ากรอก = อาจอนุมัติผิดคน
+VOUCHER_EXTEND = "voucher_extend"    # ต่อเวลาสิทธิ์ที่ยังใช้ได้ (ปุ่ม +1 ชม. บนแดชบอร์ด)
 VOUCHER_DEVICES = "voucher_devices"  # แก้จำนวนเครื่องของสิทธิ์ที่ยังใช้ได้ (เช่น ลูกค้าขอเพิ่มเครื่อง)
 
 
